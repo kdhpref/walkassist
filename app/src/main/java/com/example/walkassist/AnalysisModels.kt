@@ -43,6 +43,7 @@ data class DetectedObjectResult(
 data class AnalyzerDebugInfo(
     val detectorReady: Boolean,
     val floorConfidence: Float,
+    val floorMode: String,
     val modelInputSize: String,
     val modelOutputShape: String,
     val processedFrames: Int,

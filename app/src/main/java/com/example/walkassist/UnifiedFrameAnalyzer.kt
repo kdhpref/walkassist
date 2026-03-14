@@ -14,7 +14,7 @@ class UnifiedFrameAnalyzer(
 ) : ImageAnalysis.Analyzer {
     private val detector = ObjectAnalyzer(context)
     private val distanceEstimator = DistanceEstimator()
-    private val floorSegmenter = FloorSegmenter()
+    private val floorSegmenter = ModelFloorSegmenter(context)
     private val tracker = ObjectTracker()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var frameCounter = 0
@@ -52,6 +52,7 @@ class UnifiedFrameAnalyzer(
                         debugInfo = AnalyzerDebugInfo(
                             detectorReady = detector.isReady(),
                             floorConfidence = floorSegmentation.confidence,
+                            floorMode = floorSegmenter.lastMode,
                             modelInputSize = detector.modelInputSizeLabel(),
                             modelOutputShape = detector.modelOutputShapeLabel(),
                             processedFrames = frameCounter / 2,

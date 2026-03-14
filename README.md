@@ -6,7 +6,8 @@ Android obstacle-distance prototype for pedestrian assistance.
 
 - `CameraX` preview and frame analysis
 - `YOLOv8n` object detection from `app/src/main/assets/yolov8n.tflite`
-- floor-boundary estimation from the lower camera image
+- `DeepLabV3-MobileNetV3 Cityscapes` floor segmentation from `app/src/main/assets/deeplabv3_cityscapes.tflite`
+- heuristic floor segmentation fallback when the model is unavailable or throttled
 - distance estimation from:
   - phone pitch
   - camera height assumption
@@ -20,6 +21,7 @@ Android obstacle-distance prototype for pedestrian assistance.
 ## Current limitations
 
 - Distance is still a geometry estimate, not a true depth measurement
+- The Cityscapes floor model is throttled and cached because it is expensive on-device
 - Accuracy depends on:
   - seeing the floor clearly
   - object touching the floor
@@ -49,6 +51,6 @@ cmd /c gradlew.bat installDebug
 
 ## Next recommended work
 
-- replace heuristic floor segmentation with a trained floor segmentation model
+- replace the current heavy Cityscapes model with a smaller outdoor walkable-surface model
 - tune camera-height and FOV assumptions per device
 - add object-specific distance confidence and temporal filtering improvements

@@ -411,7 +411,7 @@ private fun DebugPanel(
                 color = Color(0xFFD9E2EA),
             )
             Text(
-                "Floor confidence: ${String.format("%.0f%%", debugInfo.floorConfidence * 100f)}",
+                "Floor: ${debugInfo.floorMode}  |  Confidence: ${String.format("%.0f%%", debugInfo.floorConfidence * 100f)}",
                 color = Color(0xFFD9E2EA),
             )
             Text(
