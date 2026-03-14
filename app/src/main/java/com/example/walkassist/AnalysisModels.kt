@@ -17,6 +17,7 @@ enum class RiskLevel {
 data class DetectionDistanceEstimate(
     val distanceMeters: Float?,
     val rawGeometryDistanceMeters: Float?,
+    val qualityScore: Float,
     val source: DistanceSource,
     val riskLevel: RiskLevel,
 )

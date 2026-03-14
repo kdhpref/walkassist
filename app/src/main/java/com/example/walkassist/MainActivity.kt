@@ -54,7 +54,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
-import kotlin.math.atan2
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -131,21 +130,33 @@ private fun rememberPitchRadians(): Float {
 
     DisposableEffect(context) {
         val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-        val sensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+        val rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        val fallbackSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
             ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
         val listener = object : SensorEventListener {
+            private val rotationMatrix = FloatArray(9)
+            private val orientation = FloatArray(3)
+
             override fun onSensorChanged(event: SensorEvent) {
-                val y = event.values[1].toDouble()
-                val z = event.values[2].toDouble()
-                pitchRadians = atan2(z, y).toFloat()
+                if (event.sensor.type == Sensor.TYPE_ROTATION_VECTOR) {
+                    SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+                    SensorManager.getOrientation(rotationMatrix, orientation)
+                    pitchRadians = -orientation[1]
+                } else {
+                    val y = event.values[1].toDouble()
+                    val z = event.values[2].toDouble()
+                    pitchRadians = kotlin.math.atan2(z, y).toFloat()
+                }
             }
 
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
         }
 
-        if (sensor != null) {
-            sensorManager.registerListener(listener, sensor, SensorManager.SENSOR_DELAY_UI)
+        if (rotationVectorSensor != null) {
+            sensorManager.registerListener(listener, rotationVectorSensor, SensorManager.SENSOR_DELAY_UI)
+        } else if (fallbackSensor != null) {
+            sensorManager.registerListener(listener, fallbackSensor, SensorManager.SENSOR_DELAY_UI)
         }
 
         onDispose {
@@ -342,6 +353,10 @@ private fun LiveInfoPanel(
                 Text(
                     "Distance: ${shownDistance?.let(::formatMeters) ?: "unavailable"}",
                     color = Color.White,
+                )
+                Text(
+                    "Source: ${nearest.distanceEstimate.source.name.lowercase().replace('_', ' ')}  |  Quality: ${String.format("%.0f%%", nearest.distanceEstimate.qualityScore * 100f)}",
+                    color = Color(0xFFD9E2EA),
                 )
                 Text(
                     "Confidence: ${String.format("%.0f%%", nearest.confidence * 100f)}  |  Track: #${nearest.trackingState?.trackId ?: 0}",

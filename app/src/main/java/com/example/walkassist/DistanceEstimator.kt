@@ -49,6 +49,11 @@ class DistanceEstimator(
         return DetectionDistanceEstimate(
             distanceMeters = rawGroundDistance,
             rawGeometryDistanceMeters = rawGroundDistance,
+            qualityScore = estimateQuality(
+                detection = detection,
+                floorSegmentation = floorSegmentation,
+                usedFloorBoundary = floorContactY != null,
+            ),
             source = source,
             riskLevel = classifyRisk(rawGroundDistance),
         )
@@ -120,5 +125,20 @@ class DistanceEstimator(
             distanceMeters < 3.0f -> RiskLevel.WARNING
             else -> RiskLevel.SAFE
         }
+    }
+
+    private fun estimateQuality(
+        detection: RawDetection,
+        floorSegmentation: FloorSegmentationResult?,
+        usedFloorBoundary: Boolean,
+    ): Float {
+        val boxAreaRatio =
+            (detection.boundingBox.width() * detection.boundingBox.height()) /
+                (detection.imageWidth.toFloat() * detection.imageHeight.toFloat())
+        val boxScore = (boxAreaRatio / 0.18f).coerceIn(0f, 1f)
+        val floorScore = floorSegmentation?.confidence ?: 0f
+        val sourceBonus = if (usedFloorBoundary) 0.2f else 0f
+        return (boxScore * 0.45f + floorScore * 0.35f + detection.confidence * 0.2f + sourceBonus)
+            .coerceIn(0f, 1f)
     }
 }
