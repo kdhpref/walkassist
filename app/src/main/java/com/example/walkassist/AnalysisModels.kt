@@ -4,6 +4,8 @@ import android.graphics.RectF
 
 enum class DistanceSource {
     FLOOR_SEGMENTATION,
+    HYBRID_GEOMETRY_SIZE,
+    SIZE_PRIOR,
     GROUND_GEOMETRY,
     UNKNOWN,
 }
@@ -28,6 +30,8 @@ data class TrackingState(
     val consecutiveHits: Int,
     val isStable: Boolean,
     val smoothedDistanceMeters: Float?,
+    val closingSpeedMetersPerSecond: Float?,
+    val timeToCollisionSeconds: Float?,
 )
 
 data class DetectedObjectResult(
@@ -68,9 +72,20 @@ data class FloorSegmentationResult(
     }
 }
 
+data class PathMetrics(
+    val pathClearMeters: Float?,
+    val centerObstacleMeters: Float?,
+    val collisionDistanceMeters: Float?,
+    val laneWidthMeters: Float?,
+    val likelyWallAhead: Boolean,
+    val egoOcclusionDetected: Boolean,
+    val timeToCollisionSeconds: Float?,
+)
+
 data class FrameAnalysis(
     val detections: List<DetectedObjectResult>,
     val nearestObstacle: DetectedObjectResult?,
     val floorSegmentation: FloorSegmentationResult? = null,
+    val pathMetrics: PathMetrics? = null,
     val debugInfo: AnalyzerDebugInfo? = null,
 )

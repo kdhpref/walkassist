@@ -12,10 +12,9 @@ class UnifiedFrameAnalyzer(
     private val currentPitchRadians: () -> Float,
     private val onAnalysis: (FrameAnalysis) -> Unit,
 ) : ImageAnalysis.Analyzer {
-    private val detector = ObjectAnalyzer(context)
-    private val distanceEstimator = DistanceEstimator()
     private val floorSegmenter = ModelFloorSegmenter(context)
-    private val tracker = ObjectTracker()
+    private val pathAnalyzer = PathAnalyzer()
+    private val tracker = FreeSpaceTracker()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var frameCounter = 0
 
@@ -28,37 +27,36 @@ class UnifiedFrameAnalyzer(
             }
 
             val floorSegmentation = floorSegmenter.segment(bitmap)
-            val detections = detector.detect(bitmap).map { detection ->
-                DetectedObjectResult(
-                    boundingBox = detection.boundingBox,
-                    confidence = detection.confidence,
-                    imageHeight = detection.imageHeight,
-                    imageWidth = detection.imageWidth,
-                    label = detection.label,
-                    distanceEstimate = distanceEstimator.estimate(
-                        detection = detection,
-                        pitchRadians = currentPitchRadians(),
-                        floorSegmentation = floorSegmentation,
-                    ),
-                )
-            }
-            val trackedDetections = tracker.update(detections)
+            val pitchRadians = currentPitchRadians()
+            val rawPathMetrics = pathAnalyzer.analyze(
+                bitmap = bitmap,
+                floorSegmentation = floorSegmentation,
+                pitchRadians = pitchRadians,
+                imageWidth = bitmap.width,
+                imageHeight = bitmap.height,
+            )
+            val (smoothedSegmentation, pathMetrics) = tracker.update(
+                floorSegmentation = floorSegmentation,
+                pathMetrics = rawPathMetrics,
+                timestampNanos = imageProxy.imageInfo.timestamp,
+            )
             mainHandler.post {
                 onAnalysis(
                     FrameAnalysis(
-                        detections = trackedDetections,
-                        nearestObstacle = trackedDetections.firstOrNull(),
-                        floorSegmentation = floorSegmentation,
+                        detections = emptyList(),
+                        nearestObstacle = null,
+                        floorSegmentation = smoothedSegmentation,
+                        pathMetrics = pathMetrics,
                         debugInfo = AnalyzerDebugInfo(
-                            detectorReady = detector.isReady(),
-                            floorConfidence = floorSegmentation.confidence,
+                            detectorReady = true,
+                            floorConfidence = smoothedSegmentation.confidence,
                             floorMode = floorSegmenter.lastMode,
-                            modelInputSize = detector.modelInputSizeLabel(),
-                            modelOutputShape = detector.modelOutputShapeLabel(),
+                            modelInputSize = "free-space-ipm",
+                            modelOutputShape = "path-metrics",
                             processedFrames = frameCounter / 2,
-                            rawDetectionCount = detector.lastRawDetectionCount,
-                            trackedDetectionCount = trackedDetections.size,
-                            lastError = detector.lastErrorMessage,
+                            rawDetectionCount = 0,
+                            trackedDetectionCount = 0,
+                            lastError = null,
                         ),
                     ),
                 )
@@ -74,6 +72,6 @@ class UnifiedFrameAnalyzer(
     }
 
     fun close() {
-        detector.close()
+        Unit
     }
 }

@@ -6,18 +6,21 @@ import kotlin.math.abs
 private data class TrackMemory(
     val ageFrames: Int,
     val boundingBox: RectF,
+    val closingSpeedMetersPerSecond: Float?,
     val consecutiveHits: Int,
     val distanceMeters: Float?,
     val id: Int,
     val label: String,
+    val lastTimestampNanos: Long?,
     val missedFrames: Int,
+    val timeToCollisionSeconds: Float?,
 )
 
 class ObjectTracker {
     private val tracks = mutableMapOf<Int, TrackMemory>()
     private var nextTrackId = 1
 
-    fun update(detections: List<DetectedObjectResult>): List<DetectedObjectResult> {
+    fun update(detections: List<DetectedObjectResult>, timestampNanos: Long): List<DetectedObjectResult> {
         val updatedTracks = mutableMapOf<Int, TrackMemory>()
         val unassignedTrackIds = tracks.keys.toMutableSet()
         val results = mutableListOf<DetectedObjectResult>()
@@ -35,16 +38,25 @@ class ObjectTracker {
                 previous = previousTrack?.distanceMeters,
                 current = detection.distanceEstimate.distanceMeters,
             )
+            val motion = estimateMotion(
+                previousDistance = previousTrack?.distanceMeters,
+                currentDistance = smoothedDistance,
+                previousTimestampNanos = previousTrack?.lastTimestampNanos,
+                timestampNanos = timestampNanos,
+            )
             val ageFrames = (previousTrack?.ageFrames ?: 0) + 1
             val consecutiveHits = (previousTrack?.consecutiveHits ?: 0) + 1
             val memory = TrackMemory(
                 ageFrames = ageFrames,
                 boundingBox = RectF(detection.boundingBox),
+                closingSpeedMetersPerSecond = motion.first,
                 consecutiveHits = consecutiveHits,
                 distanceMeters = smoothedDistance,
                 id = trackId,
                 label = detection.label,
+                lastTimestampNanos = timestampNanos,
                 missedFrames = 0,
+                timeToCollisionSeconds = motion.second,
             )
             updatedTracks[trackId] = memory
             results += detection.copy(
@@ -54,6 +66,8 @@ class ObjectTracker {
                     consecutiveHits = consecutiveHits,
                     isStable = consecutiveHits >= 4,
                     smoothedDistanceMeters = smoothedDistance,
+                    closingSpeedMetersPerSecond = motion.first,
+                    timeToCollisionSeconds = motion.second,
                 ),
             )
         }
@@ -93,7 +107,6 @@ class ObjectTracker {
 
         for (trackId in candidateTrackIds) {
             val track = tracks[trackId] ?: continue
-            if (track.label != detection.label) continue
 
             val iou = calculateIoU(track.boundingBox, detection.boundingBox)
             val centerPenalty = centerDistancePenalty(track.boundingBox, detection.boundingBox)
@@ -112,6 +125,23 @@ class ObjectTracker {
         if (current == null) return previous
         if (previous == null) return current
         return (previous * 0.7f) + (current * 0.3f)
+    }
+
+    private fun estimateMotion(
+        previousDistance: Float?,
+        currentDistance: Float?,
+        previousTimestampNanos: Long?,
+        timestampNanos: Long,
+    ): Pair<Float?, Float?> {
+        if (previousDistance == null || currentDistance == null || previousTimestampNanos == null) {
+            return null to null
+        }
+        val dtSeconds = (timestampNanos - previousTimestampNanos) / 1_000_000_000f
+        if (dtSeconds <= 0.05f) return null to null
+        val closingSpeed = (previousDistance - currentDistance) / dtSeconds
+        if (!closingSpeed.isFinite() || closingSpeed <= 0.05f) return 0f to null
+        val ttc = currentDistance / closingSpeed
+        return closingSpeed to if (ttc.isFinite() && ttc in 0.1f..12f) ttc else null
     }
 
     private fun centerDistancePenalty(a: RectF, b: RectF): Float {

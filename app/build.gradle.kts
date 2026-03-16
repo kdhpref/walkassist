@@ -58,6 +58,8 @@ dependencies {
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
+    implementation("androidx.appcompat:appcompat:1.7.0")
+    implementation("androidx.fragment:fragment-ktx:1.8.6")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
@@ -65,6 +67,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics:1.6.1")
     implementation("androidx.compose.ui:ui-tooling-preview:1.6.1")
     implementation("androidx.compose.material3:material3:1.2.0")
+    implementation("com.google.ar:core:1.46.0")
+    implementation("com.google.ar.sceneform.ux:sceneform-ux:1.17.1")
 
     testImplementation("junit:junit:4.13.2")
 }
