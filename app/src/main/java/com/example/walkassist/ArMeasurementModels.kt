@@ -23,6 +23,7 @@ data class ArMeasurementState(
     val floorDistanceMeters: Float? = null,
     val wallDistanceMeters: Float? = null,
     val depthDistanceMeters: Float? = null,
+    val rawDepthDistanceMeters: Float? = null,
     val collisionDistanceMeters: Float? = null,
     val approachSpeedMetersPerSecond: Float? = null,
     val motionMetersPerSecond: Float? = null,

@@ -1,15 +1,19 @@
 package com.example.walkassist
 
+import android.media.Image
 import android.os.Bundle
 import android.view.View
 import com.google.ar.core.Config
+import com.google.ar.core.Coordinates2d
 import com.google.ar.core.DepthPoint
 import com.google.ar.core.Frame
 import com.google.ar.core.Plane
 import com.google.ar.core.Point
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
+import com.google.ar.core.exceptions.NotYetAvailableException
 import com.google.ar.sceneform.ux.ArFragment
+import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.sqrt
@@ -19,6 +23,7 @@ class WalkAssistArFragment : ArFragment() {
         val floor: Float?,
         val wall: Float?,
         val depth: Float?,
+        val rawDepth: Float?,
         val collision: Float?,
     )
 
@@ -38,6 +43,7 @@ class WalkAssistArFragment : ArFragment() {
     private var smoothedFloorDistance: Float? = null
     private var smoothedWallDistance: Float? = null
     private var smoothedDepthDistance: Float? = null
+    private var smoothedRawDepthDistance: Float? = null
     private var smoothedCollisionDistance: Float? = null
     private var smoothedLeftDistance: Float? = null
     private var smoothedCenterDistance: Float? = null
@@ -107,14 +113,16 @@ class WalkAssistArFragment : ArFragment() {
 
         val pitchDownDegrees = computePitchDownDegrees(frame)
         val corridorHits = sampleWorldCorridor(frame)
+        val rawDepthHits = sampleRawDepthCorridor(frame)
 
-        val leftLane = corridorLaneDistances(corridorHits, "left")
-        val centerLane = corridorLaneDistances(corridorHits, "center")
-        val rightLane = corridorLaneDistances(corridorHits, "right")
+        val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left")
+        val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center")
+        val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right")
 
         val floorDistance = listOfNotNull(leftLane.floor, centerLane.floor, rightLane.floor).minOrNull()
         val wallDistance = listOfNotNull(leftLane.wall, centerLane.wall, rightLane.wall).minOrNull()
         val depthDistance = listOfNotNull(leftLane.depth, centerLane.depth, rightLane.depth).minOrNull()
+        val rawDepthDistance = listOfNotNull(leftLane.rawDepth, centerLane.rawDepth, rightLane.rawDepth).minOrNull()
         val rawCollisionDistance = listOfNotNull(
             leftLane.collision,
             centerLane.collision,
@@ -124,6 +132,9 @@ class WalkAssistArFragment : ArFragment() {
         val smoothedFloor = smoothDistance(smoothedFloorDistance, floorDistance).also { smoothedFloorDistance = it }
         val smoothedWall = smoothDistance(smoothedWallDistance, wallDistance).also { smoothedWallDistance = it }
         val smoothedDepth = smoothDistance(smoothedDepthDistance, depthDistance).also { smoothedDepthDistance = it }
+        val smoothedRawDepth = smoothDistance(smoothedRawDepthDistance, rawDepthDistance).also {
+            smoothedRawDepthDistance = it
+        }
         val collisionDistance = smoothDistance(smoothedCollisionDistance, rawCollisionDistance).also {
             smoothedCollisionDistance = it
         }
@@ -186,6 +197,7 @@ class WalkAssistArFragment : ArFragment() {
                 floorDistanceMeters = smoothedFloor,
                 wallDistanceMeters = smoothedWall,
                 depthDistanceMeters = smoothedDepth,
+                rawDepthDistanceMeters = smoothedRawDepth,
                 collisionDistanceMeters = collisionDistance,
                 approachSpeedMetersPerSecond = approachSpeed,
                 motionMetersPerSecond = motionSpeed,
@@ -218,9 +230,13 @@ class WalkAssistArFragment : ArFragment() {
 
     private fun corridorLaneDistances(
         hits: List<CorridorHit>,
+        rawDepthHits: List<CorridorHit>,
         lane: String,
     ): LaneDistances {
         val filtered = hits.filter { classifyLane(it.lateralMeters) == lane }
+        val rawDepth = rawDepthHits
+            .filter { classifyLane(it.lateralMeters) == lane }
+            .minOfOrNull { it.distanceMeters }
         val floor = filtered.filter { it.source == HitSource.FLOOR }.minOfOrNull { it.distanceMeters }
         val wall = filtered.filter { it.source == HitSource.WALL }.minOfOrNull { it.distanceMeters }
         val depth = filtered.filter { it.source == HitSource.DEPTH }.minOfOrNull { it.distanceMeters }
@@ -228,7 +244,8 @@ class WalkAssistArFragment : ArFragment() {
             floor = floor,
             wall = wall,
             depth = depth,
-            collision = listOfNotNull(floor, wall, depth).minOrNull(),
+            rawDepth = rawDepth,
+            collision = listOfNotNull(floor, wall, depth, rawDepth).minOrNull(),
         )
     }
 
@@ -324,6 +341,127 @@ class WalkAssistArFragment : ArFragment() {
             }
             .filter { classifyLane(it.lateralMeters) != null }
             .minByOrNull { it.distanceMeters }
+    }
+
+    private fun sampleRawDepthCorridor(frame: Frame): List<CorridorHit> {
+        val width = arSceneView.width.toFloat().coerceAtLeast(1f)
+        val height = arSceneView.height.toFloat().coerceAtLeast(1f)
+        val sampleXs = listOf(0.18f, 0.3f, 0.42f, 0.5f, 0.58f, 0.7f, 0.82f)
+        val sampleYs = listOf(0.42f, 0.54f, 0.66f, 0.78f)
+
+        return try {
+            frame.acquireRawDepthImage16Bits().use { rawDepthImage ->
+                frame.acquireRawDepthConfidenceImage().use { confidenceImage ->
+                    buildList {
+                        for (yRatio in sampleYs) {
+                            for (xRatio in sampleXs) {
+                                val hit = rawDepthHitAt(
+                                    frame = frame,
+                                    rawDepthImage = rawDepthImage,
+                                    confidenceImage = confidenceImage,
+                                    viewX = width * xRatio,
+                                    viewY = height * yRatio,
+                                )
+                                if (hit != null) {
+                                    add(hit)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (_: NotYetAvailableException) {
+            emptyList()
+        } catch (_: IllegalStateException) {
+            emptyList()
+        }
+    }
+
+    private fun rawDepthHitAt(
+        frame: Frame,
+        rawDepthImage: Image,
+        confidenceImage: Image,
+        viewX: Float,
+        viewY: Float,
+    ): CorridorHit? {
+        val textureCoordinates = FloatArray(2)
+        frame.transformCoordinates2d(
+            Coordinates2d.VIEW,
+            floatArrayOf(viewX, viewY),
+            Coordinates2d.TEXTURE_NORMALIZED,
+            textureCoordinates,
+        )
+        val textureX = textureCoordinates[0]
+        val textureY = textureCoordinates[1]
+        if (textureX !in 0f..1f || textureY !in 0f..1f) {
+            return null
+        }
+
+        val depthX = (textureX * rawDepthImage.width).toInt().coerceIn(0, rawDepthImage.width - 1)
+        val depthY = (textureY * rawDepthImage.height).toInt().coerceIn(0, rawDepthImage.height - 1)
+
+        val depthMillimeters = getMillimetersDepth(rawDepthImage, depthX, depthY)
+        if (depthMillimeters <= 0) {
+            return null
+        }
+
+        val confidence = getConfidence(rawDepthImage = confidenceImage, x = depthX, y = depthY)
+        if (confidence < 80) {
+            return null
+        }
+
+        val imageCoordinates = FloatArray(2)
+        frame.transformCoordinates2d(
+            Coordinates2d.TEXTURE_NORMALIZED,
+            floatArrayOf(textureX, textureY),
+            Coordinates2d.IMAGE_PIXELS,
+            imageCoordinates,
+        )
+
+        val fx = frame.camera.imageIntrinsics.focalLength[0]
+        val cx = frame.camera.imageIntrinsics.principalPoint[0]
+        if (fx == 0f) {
+            return null
+        }
+
+        val forwardMeters = depthMillimeters / 1000f
+        if (forwardMeters <= 0.15f || forwardMeters > 4.5f) {
+            return null
+        }
+
+        val lateralMeters = ((imageCoordinates[0] - cx) / fx) * forwardMeters
+        if (classifyLane(lateralMeters) == null) {
+            return null
+        }
+
+        val rayDistanceMeters = sqrt((forwardMeters * forwardMeters) + (lateralMeters * lateralMeters))
+        return CorridorHit(
+            distanceMeters = rayDistanceMeters,
+            lateralMeters = lateralMeters,
+            forwardMeters = forwardMeters,
+            source = HitSource.DEPTH,
+        )
+    }
+
+    private fun getMillimetersDepth(
+        depthImage: Image,
+        x: Int,
+        y: Int,
+    ): Int {
+        val plane = depthImage.planes[0]
+        val byteIndex = (x * plane.pixelStride) + (y * plane.rowStride)
+        val buffer = plane.buffer.order(ByteOrder.nativeOrder())
+        return buffer.getShort(byteIndex).toInt() and 0xFFFF
+    }
+
+    private fun getConfidence(
+        rawDepthImage: Image,
+        x: Int,
+        y: Int,
+    ): Int {
+        val plane = rawDepthImage.planes[0]
+        val byteIndex = (x * plane.pixelStride) + (y * plane.rowStride)
+        return plane.buffer.get(byteIndex).toInt() and 0xFF
     }
 
     private fun smoothDistance(previous: Float?, current: Float?): Float? {

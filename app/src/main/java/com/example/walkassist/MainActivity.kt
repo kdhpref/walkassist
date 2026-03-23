@@ -129,6 +129,10 @@ private fun MeasurementOverlay(state: ArMeasurementState) {
             color = Color.White,
         )
         Text(
+            "Raw ${state.rawDepthDistanceMeters?.let(::formatMeters) ?: "-"}",
+            color = Color.White,
+        )
+        Text(
             "Hit ${state.collisionDistanceMeters?.let(::formatMeters) ?: "-"}",
             color = Color.White,
         )
