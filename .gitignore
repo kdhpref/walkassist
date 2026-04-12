@@ -24,3 +24,10 @@ read_tflite.py
 yolov8n.onnx
 yolov8n.pt
 yolov8n_saved_model/
+
+# Desktop training/labeling tool local artifacts
+desktop_tools/**/.venv/
+desktop_tools/**/__pycache__/
+desktop_tools/**/img/
+desktop_tools/**/label/
+desktop_tools/**/*.pt

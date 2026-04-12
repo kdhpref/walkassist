@@ -9,14 +9,21 @@ import android.widget.FrameLayout
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,14 +32,27 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.commitNow
 import androidx.fragment.app.FragmentContainerView
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
     private val fragmentContainerId = 1001
@@ -93,9 +113,321 @@ class MainActivity : AppCompatActivity() {
 
 @Composable
 private fun MeasurementOverlay(state: ArMeasurementState) {
+    var debugVisible by remember { mutableStateOf(false) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        ObjectDetectionOverlay(
+            detections = state.objectDetections,
+            modifier = Modifier.fillMaxSize(),
+        )
+
+        CompactWorldMapOverlay(
+            state = state,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 14.dp, bottom = 18.dp),
+        )
+
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 14.dp, top = 14.dp)
+                .width(222.dp)
+                .background(Color(0xB8121820), RoundedCornerShape(20.dp))
+                .padding(horizontal = 14.dp, vertical = 14.dp),
+        ) {
+            val (riskText, riskColor) = presentableRisk(state.riskLabel)
+            val confidenceColor = when {
+                state.sensingConfidenceScore >= 80 -> Color(0xFF96E2B5)
+                state.sensingConfidenceScore >= 55 -> Color(0xFFFFDB7A)
+                else -> Color(0xFFFFA0A0)
+            }
+
+            Text(
+                text = "WalkAssist",
+                color = Color(0xFFD8E3EE),
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = riskText,
+                color = riskColor,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = state.guidanceLabel,
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            ConfidenceBar(
+                score = state.sensingConfidenceScore,
+                color = confidenceColor,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                text = "공간 인식 신뢰도 ${state.sensingConfidenceScore}점",
+                color = confidenceColor,
+                fontSize = 13.sp,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = state.statusLabel,
+                color = Color(0xFFD8E3EE),
+                fontSize = 12.sp,
+            )
+        }
+
+        OverlayToggleChip(
+            label = "DBG",
+            active = debugVisible,
+            onClick = { debugVisible = !debugVisible },
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 14.dp, end = 14.dp),
+        )
+
+        if (debugVisible) {
+            DebugOverlay(
+                state = state,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 14.dp, top = 170.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun OverlayToggleChip(
+    label: String,
+    active: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = label,
+        color = Color.White,
+        fontSize = 11.sp,
+        modifier = modifier
+            .background(
+                if (active) Color(0xBF375D7A) else Color(0x7A141B24),
+                RoundedCornerShape(10.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+    )
+}
+
+private data class VoxelOverlayCluster(
+    val hullPoints: List<Offset>,
+    val averageOccupancy: Float,
+    val averageConfidence: Float,
+    val pointCount: Int,
+)
+
+private fun cross(o: Offset, a: Offset, b: Offset): Float {
+    return ((a.x - o.x) * (b.y - o.y)) - ((a.y - o.y) * (b.x - o.x))
+}
+
+private fun convexHull(points: List<Offset>): List<Offset> {
+    if (points.size <= 3) return points.distinct()
+
+    val sorted = points
+        .distinctBy { "${it.x},${it.y}" }
+        .sortedWith(compareBy<Offset> { it.x }.thenBy { it.y })
+
+    if (sorted.size <= 3) return sorted
+
+    val lower = mutableListOf<Offset>()
+    sorted.forEach { point ->
+        while (lower.size >= 2 && cross(lower[lower.size - 2], lower.last(), point) <= 0f) {
+            lower.removeAt(lower.lastIndex)
+        }
+        lower += point
+    }
+
+    val upper = mutableListOf<Offset>()
+    for (index in sorted.indices.reversed()) {
+        val point = sorted[index]
+        while (upper.size >= 2 && cross(upper[upper.size - 2], upper.last(), point) <= 0f) {
+            upper.removeAt(upper.lastIndex)
+        }
+        upper += point
+    }
+
+    lower.removeAt(lower.lastIndex)
+    upper.removeAt(upper.lastIndex)
+    return lower + upper
+}
+
+private fun clusterVoxelOverlayPoints(
+    points: List<VoxelOverlayPointUi>,
+): List<VoxelOverlayCluster> {
+    if (points.isEmpty()) return emptyList()
+
+    val remaining = points.toMutableList()
+    val clusters = mutableListOf<VoxelOverlayCluster>()
+    val xThreshold = 0.07f
+    val yThreshold = 0.09f
+
+    while (remaining.isNotEmpty()) {
+        val seed = remaining.removeAt(0)
+        val clusterPoints = mutableListOf(seed)
+        var index = 0
+        while (index < clusterPoints.size) {
+            val current = clusterPoints[index]
+            val iterator = remaining.iterator()
+            while (iterator.hasNext()) {
+                val candidate = iterator.next()
+                if (
+                    abs(candidate.xRatio - current.xRatio) <= xThreshold &&
+                    abs(candidate.yRatio - current.yRatio) <= yThreshold
+                ) {
+                    clusterPoints += candidate
+                    iterator.remove()
+                }
+            }
+            index += 1
+        }
+
+        if (clusterPoints.size < 6) continue
+
+        var occupancySum = 0f
+        var confidenceSum = 0f
+
+        clusterPoints.forEach { point ->
+            occupancySum += point.occupancyScore
+            confidenceSum += point.confidenceScore
+        }
+
+        val centerX = clusterPoints.map { it.xRatio }.average().toFloat()
+        val centerY = clusterPoints.map { it.yRatio }.average().toFloat()
+        val expandedPoints = clusterPoints.map { point ->
+            val dx = point.xRatio - centerX
+            val dy = point.yRatio - centerY
+            Offset(
+                x = (point.xRatio + (dx * 0.18f)).coerceIn(0f, 1f),
+                y = (point.yRatio + (dy * 0.18f)).coerceIn(0f, 1f),
+            )
+        }
+        val hull = convexHull(expandedPoints)
+        if (hull.size < 3) continue
+
+        clusters += VoxelOverlayCluster(
+            hullPoints = hull,
+            averageOccupancy = occupancySum / clusterPoints.size,
+            averageConfidence = confidenceSum / clusterPoints.size,
+            pointCount = clusterPoints.size,
+        )
+    }
+
+    return clusters.sortedByDescending { it.pointCount }
+}
+
+@Composable
+private fun VoxelClusterOverlay(
+    points: List<VoxelOverlayPointUi>,
+    modifier: Modifier = Modifier,
+) {
+    val clusters = remember(points) { clusterVoxelOverlayPoints(points).take(12) }
+
+    Canvas(modifier = modifier) {
+        clusters.forEach { cluster ->
+            val fillColor = when {
+                cluster.averageOccupancy >= 0.55f -> Color(0x4DFF8E8E)
+                cluster.averageOccupancy >= 0.28f -> Color(0x4DFFC870)
+                else -> Color(0x407A8794)
+            }.copy(alpha = 0.18f + (cluster.averageConfidence * 0.28f))
+            val borderColor = when {
+                cluster.averageOccupancy >= 0.55f -> Color(0xCCFF8E8E)
+                cluster.averageOccupancy >= 0.28f -> Color(0xCCFFC870)
+                else -> Color(0xAA9AA7B4)
+            }.copy(alpha = 0.45f + (cluster.averageConfidence * 0.35f))
+
+            val path = Path().apply {
+                cluster.hullPoints.forEachIndexed { index, point ->
+                    val x = point.x * size.width
+                    val y = point.y * size.height
+                    if (index == 0) {
+                        moveTo(x, y)
+                    } else {
+                        lineTo(x, y)
+                    }
+                }
+                close()
+            }
+
+            drawPath(
+                path = path,
+                color = fillColor,
+            )
+            drawPath(
+                path = path,
+                color = borderColor,
+                style = Stroke(width = 3f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ObjectDetectionOverlay(
+    detections: List<ObjectOverlayDetection>,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val boxStrokeColor = Color(0xFFFFB648)
+        val labelBackground = Color(0xCC121820)
+
+        detections.forEach { detection ->
+            val boxLeft = maxWidth * detection.leftRatio.coerceIn(0f, 1f)
+            val boxTop = maxHeight * detection.topRatio.coerceIn(0f, 1f)
+            val boxWidth = maxWidth * detection.widthRatio.coerceIn(0.05f, 1f)
+            val boxHeight = maxHeight * detection.heightRatio.coerceIn(0.05f, 1f)
+
+            Box(
+                modifier = Modifier
+                    .offset(x = boxLeft, y = boxTop)
+                    .width(boxWidth)
+                    .height(boxHeight)
+                    .border(2.dp, boxStrokeColor, RoundedCornerShape(8.dp)),
+            ) {
+                Text(
+                    text = buildString {
+                        append(presentableLabel(detection.label))
+                        detection.distanceMeters?.let {
+                            append(" ")
+                            append(formatMetersShort(it, detection.distanceIsReference))
+                        }
+                        append(" ")
+                        append((detection.confidence * 100f).toInt())
+                        append("%")
+                    },
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .offset(y = (-24).dp)
+                        .background(labelBackground, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DebugOverlay(
+    state: ArMeasurementState,
+    modifier: Modifier = Modifier,
+) {
     Column(
         modifier = Modifier
-            .padding(start = 10.dp, top = 10.dp)
+            .then(modifier)
             .wrapContentWidth()
             .width(170.dp)
             .background(Color(0x7A141B24), RoundedCornerShape(12.dp))
@@ -103,8 +435,8 @@ private fun MeasurementOverlay(state: ArMeasurementState) {
     ) {
         Text("AR", color = Color.White)
         Spacer(modifier = Modifier.height(4.dp))
-        CorridorMiniMap(state = state)
-        Spacer(modifier = Modifier.height(4.dp))
+        WorldMapMiniMap(state = state)
+        Spacer(modifier = Modifier.height(6.dp))
         DirectionArrow(state = state)
         Spacer(modifier = Modifier.height(4.dp))
         Text("Tracking: ${state.trackingLabel}", color = Color(0xFFD9E2EA))
@@ -115,26 +447,6 @@ private fun MeasurementOverlay(state: ArMeasurementState) {
         Text(
             "Planes: ${state.horizontalPlaneCount}/${state.verticalPlaneCount}",
             color = Color(0xFFD9E2EA),
-        )
-        Text(
-            "Floor ${state.floorDistanceMeters?.let(::formatMeters) ?: "-"}",
-            color = Color.White,
-        )
-        Text(
-            "Wall ${state.wallDistanceMeters?.let(::formatMeters) ?: "-"}",
-            color = Color.White,
-        )
-        Text(
-            "Depth ${state.depthDistanceMeters?.let(::formatMeters) ?: "-"}",
-            color = Color.White,
-        )
-        Text(
-            "Raw ${state.rawDepthDistanceMeters?.let(::formatMeters) ?: "-"}",
-            color = Color.White,
-        )
-        Text(
-            "Hit ${state.collisionDistanceMeters?.let(::formatMeters) ?: "-"}",
-            color = Color.White,
         )
         Text(
             state.guidanceLabel,
@@ -170,6 +482,82 @@ private fun MeasurementOverlay(state: ArMeasurementState) {
         if (state.note.isNotBlank()) {
             Text(state.note, color = Color(0xFFD9E2EA))
         }
+    }
+}
+
+@Composable
+private fun CompactWorldMapOverlay(
+    state: ArMeasurementState,
+    modifier: Modifier = Modifier,
+) {
+    if (state.worldMapCells.isEmpty()) return
+
+    Column(
+        modifier = modifier
+            .width(124.dp)
+            .background(Color(0x88121820), RoundedCornerShape(14.dp))
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+    ) {
+        Text(
+            text = "Space Map",
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        WorldMapMiniMap(
+            state = state,
+            modifier = Modifier
+                .width(108.dp)
+                .height(108.dp),
+        )
+    }
+}
+
+@Composable
+private fun ConfidenceBar(
+    score: Int,
+    color: Color,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(8.dp)
+            .background(Color(0x333E4A57), RoundedCornerShape(999.dp)),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth((score.coerceIn(0, 100) / 100f).coerceAtLeast(0.04f))
+                .height(8.dp)
+                .background(color, RoundedCornerShape(999.dp)),
+        )
+    }
+}
+
+private fun presentableRisk(riskLabel: String): Pair<String, Color> {
+    return when (riskLabel) {
+        "critical" -> "위험" to Color(0xFFFF8E8E)
+        "high" -> "경고" to Color(0xFFFFC870)
+        "watch" -> "주의" to Color(0xFFFFDB7A)
+        "stable" -> "안전" to Color(0xFF96E2B5)
+        else -> "주의" to Color(0xFFD8E3EE)
+    }
+}
+
+private fun presentableLabel(label: String): String {
+    return when (label.lowercase()) {
+        "person" -> "사람"
+        "bicycle" -> "자전거"
+        "car" -> "자동차"
+        "motorcycle" -> "오토바이"
+        "bus" -> "버스"
+        "truck" -> "트럭"
+        "chair" -> "의자"
+        "bench" -> "벤치"
+        "dog" -> "개"
+        "cat" -> "고양이"
+        "stop sign" -> "표지판"
+        else -> label
     }
 }
 
@@ -222,6 +610,156 @@ private fun CorridorSegment(
 }
 
 @Composable
+private fun WorldMapMiniMap(
+    state: ArMeasurementState,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .width(150.dp)
+            .height(150.dp)
+            .background(Color(0x332B3642), RoundedCornerShape(8.dp)),
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val halfRange = state.worldMapRangeMeters.coerceAtLeast(0.1f)
+            drawRect(Color(0x223A4654))
+
+            state.worldMapCells.forEach { cell ->
+                val xRatio = ((cell.relativeX + halfRange) / (halfRange * 2f)).coerceIn(0f, 1f)
+                val zRatio = (1f - ((cell.relativeZ + halfRange) / (halfRange * 2f))).coerceIn(0f, 1f)
+                val cellSizePx = (size.minDimension * (state.worldMapCellSizeMeters / (halfRange * 2f)))
+                    .coerceAtLeast(2f)
+                val color = when {
+                    cell.occupancyScore >= 0.35f -> Color(0xFFE66D7A).copy(alpha = 0.35f + (cell.confidenceScore * 0.55f))
+                    cell.occupancyScore >= 0.14f -> Color(0xFFFFC870).copy(alpha = 0.28f + (cell.confidenceScore * 0.48f))
+                    cell.occupancyScore <= -0.18f -> Color(0xFF59C58C).copy(alpha = 0.28f + (cell.confidenceScore * 0.48f))
+                    else -> Color(0xFF7A8794).copy(alpha = 0.2f + (cell.confidenceScore * 0.36f))
+                }
+                drawRect(
+                    color = color,
+                    topLeft = Offset(
+                        (size.width * xRatio) - (cellSizePx * 0.5f),
+                        (size.height * zRatio) - (cellSizePx * 0.5f),
+                    ),
+                    size = Size(cellSizePx, cellSizePx),
+                )
+            }
+
+            val centerX = size.width * 0.5f
+            val centerY = size.height * 0.5f
+            drawCircle(
+                color = Color.White,
+                radius = 5f,
+                center = Offset(centerX, centerY),
+            )
+            drawLine(
+                color = Color(0xFF8FC8FF),
+                start = Offset(centerX, centerY),
+                end = Offset(centerX, centerY - 22f),
+                strokeWidth = 4f,
+            )
+        }
+    }
+}
+
+@Composable
+private fun VoxelMiniMap(state: ArMeasurementState) {
+    Box(
+        modifier = Modifier
+            .width(150.dp)
+            .height(150.dp)
+            .background(Color(0x22212A34), RoundedCornerShape(8.dp)),
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val halfRange = state.voxelRangeMeters.coerceAtLeast(0.1f)
+            drawRect(Color(0x163A4654))
+
+            state.voxelColumns.forEach { column ->
+                val xRatio = ((column.relativeX + halfRange) / (halfRange * 2f)).coerceIn(0f, 1f)
+                val zRatio = (1f - ((column.relativeZ + halfRange) / (halfRange * 2f))).coerceIn(0f, 1f)
+                val voxelSizePx = (size.minDimension * (state.voxelSizeMeters / (halfRange * 2f)))
+                    .coerceAtLeast(3f)
+                val heightInfluence = ((column.heightMeters + 0.4f) / 1.8f).coerceIn(0f, 1f)
+                val color = when {
+                    column.occupancyScore >= 0.55f -> Color(0xFFFF8E8E)
+                    column.occupancyScore >= 0.28f -> Color(0xFFFFC870)
+                    else -> Color(0xFF8C97A3)
+                }.copy(alpha = 0.28f + (column.confidenceScore * 0.42f) + (heightInfluence * 0.2f))
+                drawRect(
+                    color = color,
+                    topLeft = Offset(
+                        (size.width * xRatio) - (voxelSizePx * 0.5f),
+                        (size.height * zRatio) - (voxelSizePx * 0.5f),
+                    ),
+                    size = Size(
+                        voxelSizePx + (heightInfluence * 3f),
+                        voxelSizePx + (heightInfluence * 3f),
+                    ),
+                )
+            }
+
+            val centerX = size.width * 0.5f
+            val centerY = size.height * 0.5f
+            drawCircle(
+                color = Color.White,
+                radius = 5f,
+                center = Offset(centerX, centerY),
+            )
+            drawLine(
+                color = Color(0xFF8FC8FF),
+                start = Offset(centerX, centerY),
+                end = Offset(centerX, centerY - 22f),
+                strokeWidth = 4f,
+            )
+        }
+    }
+}
+
+@Composable
+private fun VoxelSideProfile(state: ArMeasurementState) {
+    Box(
+        modifier = Modifier
+            .width(150.dp)
+            .height(110.dp)
+            .background(Color(0x1F1F2933), RoundedCornerShape(8.dp)),
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val maxForward = state.voxelRangeMeters.coerceAtLeast(0.1f)
+            val minHeight = -1.5f
+            val maxHeight = 2.5f
+            drawRect(Color(0x143A4654))
+
+            state.voxelPoints.forEach { point ->
+                if (point.relativeZ !in 0f..maxForward) return@forEach
+                val zRatio = (point.relativeZ / maxForward).coerceIn(0f, 1f)
+                val yRatio = (1f - ((point.relativeY - minHeight) / (maxHeight - minHeight))).coerceIn(0f, 1f)
+                val voxelPx = (size.minDimension * (state.voxelSizeMeters / (maxForward + maxHeight))).coerceAtLeast(3f)
+                val color = when {
+                    point.occupancyScore >= 0.55f -> Color(0xFFFF8E8E)
+                    point.occupancyScore >= 0.28f -> Color(0xFFFFC870)
+                    else -> Color(0xFF8C97A3)
+                }.copy(alpha = 0.28f + (point.confidenceScore * 0.5f))
+                drawRect(
+                    color = color,
+                    topLeft = Offset(
+                        (size.width * zRatio) - (voxelPx * 0.5f),
+                        (size.height * yRatio) - (voxelPx * 0.5f),
+                    ),
+                    size = Size(voxelPx, voxelPx),
+                )
+            }
+
+            drawLine(
+                color = Color(0x55FFFFFF),
+                start = Offset(0f, size.height * 0.72f),
+                end = Offset(size.width, size.height * 0.72f),
+                strokeWidth = 2f,
+            )
+        }
+    }
+}
+
+@Composable
 private fun DirectionArrow(state: ArMeasurementState) {
     val arrow = when (state.suggestedDirection) {
         "left" -> "<"
@@ -241,7 +779,8 @@ private fun DirectionArrow(state: ArMeasurementState) {
     )
 }
 
-private fun formatMeters(distanceMeters: Float): String {
+private fun formatMeters(distanceMeters: Float, isReference: Boolean = false): String {
+    if (isReference) return "5m+"
     return if (distanceMeters < 1f) {
         "${(distanceMeters * 100f).toInt()} cm"
     } else {
@@ -253,7 +792,8 @@ private fun formatSpeed(speedMetersPerSecond: Float): String {
     return String.format("%.2f m/s", speedMetersPerSecond)
 }
 
-private fun formatMetersShort(distanceMeters: Float): String {
+private fun formatMetersShort(distanceMeters: Float, isReference: Boolean = false): String {
+    if (isReference) return "5m+"
     return if (distanceMeters < 1f) {
         "${(distanceMeters * 100f).toInt()}c"
     } else {
