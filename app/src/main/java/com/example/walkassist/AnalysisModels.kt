@@ -29,6 +29,8 @@ data class TrackingState(
     val ageFrames: Int,
     val consecutiveHits: Int,
     val isStable: Boolean,
+    val missedFrames: Int,
+    val isPredicted: Boolean,
     val smoothedDistanceMeters: Float?,
     val closingSpeedMetersPerSecond: Float?,
     val timeToCollisionSeconds: Float?,

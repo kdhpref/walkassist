@@ -13,6 +13,11 @@ import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
 
 class ObjectAnalyzer(context: Context) {
+    companion object {
+        private const val MODEL_ASSET_NAME = "yolo11n.tflite"
+        private const val LABELS_ASSET_NAME = "labels.txt"
+    }
+
     private val interpreter: Interpreter?
     private val labels: List<String>
     private val inputWidth: Int
@@ -33,11 +38,11 @@ class ObjectAnalyzer(context: Context) {
         var localOutputShapeDescription = "unavailable"
 
         try {
-            val modelBuffer = FileUtil.loadMappedFile(context, "yolov8n.tflite")
+            val modelBuffer = FileUtil.loadMappedFile(context, MODEL_ASSET_NAME)
             localInterpreter = Interpreter(modelBuffer, Interpreter.Options().apply {
                 numThreads = 4
             })
-            localLabels = FileUtil.loadLabels(context, "labels.txt")
+            localLabels = FileUtil.loadLabels(context, LABELS_ASSET_NAME)
             val inputShape = localInterpreter.getInputTensor(0).shape()
             if (inputShape.size >= 3) {
                 localInputHeight = inputShape[1]

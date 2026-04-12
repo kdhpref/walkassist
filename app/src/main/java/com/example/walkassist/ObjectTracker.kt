@@ -8,6 +8,8 @@ private data class TrackMemory(
     val boundingBox: RectF,
     val closingSpeedMetersPerSecond: Float?,
     val consecutiveHits: Int,
+    val confidence: Float,
+    val distanceEstimate: DetectionDistanceEstimate,
     val distanceMeters: Float?,
     val id: Int,
     val label: String,
@@ -17,6 +19,10 @@ private data class TrackMemory(
 )
 
 class ObjectTracker {
+    private val stableHitThreshold = 4
+    private val maxMissedFrames = 5
+    private val predictedDisplayFrames = 2
+
     private val tracks = mutableMapOf<Int, TrackMemory>()
     private var nextTrackId = 1
 
@@ -38,6 +44,10 @@ class ObjectTracker {
                 previous = previousTrack?.distanceMeters,
                 current = detection.distanceEstimate.distanceMeters,
             )
+            val smoothedBoundingBox = smoothBoundingBox(
+                previous = previousTrack?.boundingBox,
+                current = detection.boundingBox,
+            )
             val motion = estimateMotion(
                 previousDistance = previousTrack?.distanceMeters,
                 currentDistance = smoothedDistance,
@@ -48,9 +58,11 @@ class ObjectTracker {
             val consecutiveHits = (previousTrack?.consecutiveHits ?: 0) + 1
             val memory = TrackMemory(
                 ageFrames = ageFrames,
-                boundingBox = RectF(detection.boundingBox),
+                boundingBox = smoothedBoundingBox,
                 closingSpeedMetersPerSecond = motion.first,
                 consecutiveHits = consecutiveHits,
+                confidence = smoothConfidence(previousTrack?.confidence, detection.confidence),
+                distanceEstimate = detection.distanceEstimate.copy(distanceMeters = smoothedDistance),
                 distanceMeters = smoothedDistance,
                 id = trackId,
                 label = detection.label,
@@ -60,11 +72,15 @@ class ObjectTracker {
             )
             updatedTracks[trackId] = memory
             results += detection.copy(
+                boundingBox = RectF(smoothedBoundingBox),
+                confidence = memory.confidence,
                 trackingState = TrackingState(
                     trackId = trackId,
                     ageFrames = ageFrames,
                     consecutiveHits = consecutiveHits,
-                    isStable = consecutiveHits >= 4,
+                    isStable = consecutiveHits >= stableHitThreshold,
+                    missedFrames = 0,
+                    isPredicted = false,
                     smoothedDistanceMeters = smoothedDistance,
                     closingSpeedMetersPerSecond = motion.first,
                     timeToCollisionSeconds = motion.second,
@@ -74,12 +90,34 @@ class ObjectTracker {
 
         for (trackId in unassignedTrackIds) {
             val track = tracks[trackId] ?: continue
-            if (track.missedFrames < 5) {
-                updatedTracks[trackId] = track.copy(
+            if (track.missedFrames < maxMissedFrames) {
+                val retained = track.copy(
                     ageFrames = track.ageFrames + 1,
                     consecutiveHits = 0,
                     missedFrames = track.missedFrames + 1,
                 )
+                updatedTracks[trackId] = retained
+                if (track.consecutiveHits >= stableHitThreshold && retained.missedFrames <= predictedDisplayFrames) {
+                    results += DetectedObjectResult(
+                        boundingBox = RectF(retained.boundingBox),
+                        confidence = retained.confidence * 0.92f,
+                        imageHeight = 1,
+                        imageWidth = 1,
+                        label = retained.label,
+                        distanceEstimate = retained.distanceEstimate,
+                        trackingState = TrackingState(
+                            trackId = retained.id,
+                            ageFrames = retained.ageFrames,
+                            consecutiveHits = 0,
+                            isStable = true,
+                            missedFrames = retained.missedFrames,
+                            isPredicted = true,
+                            smoothedDistanceMeters = retained.distanceMeters,
+                            closingSpeedMetersPerSecond = retained.closingSpeedMetersPerSecond,
+                            timeToCollisionSeconds = retained.timeToCollisionSeconds,
+                        ),
+                    )
+                }
             }
         }
 
@@ -110,15 +148,38 @@ class ObjectTracker {
 
             val iou = calculateIoU(track.boundingBox, detection.boundingBox)
             val centerPenalty = centerDistancePenalty(track.boundingBox, detection.boundingBox)
-            val score = iou - centerPenalty
+            val labelBonus = if (track.label == detection.label) 0.12f else -0.08f
+            val score = iou - centerPenalty + labelBonus
 
-            if (score > bestScore && score > 0.15f) {
+            if (score > bestScore && score > 0.18f) {
                 bestScore = score
                 bestTrackId = trackId
             }
         }
 
         return bestTrackId
+    }
+
+    private fun smoothBoundingBox(previous: RectF?, current: RectF): RectF {
+        if (previous == null) return RectF(current)
+
+        val centerDelta =
+            (kotlin.math.abs(previous.centerX() - current.centerX()) +
+                kotlin.math.abs(previous.centerY() - current.centerY())) /
+                maxOf(previous.width(), previous.height(), current.width(), current.height(), 1f)
+        val alpha = if (centerDelta > 0.25f) 0.28f else 0.42f
+
+        return RectF(
+            previous.left + ((current.left - previous.left) * alpha),
+            previous.top + ((current.top - previous.top) * alpha),
+            previous.right + ((current.right - previous.right) * alpha),
+            previous.bottom + ((current.bottom - previous.bottom) * alpha),
+        )
+    }
+
+    private fun smoothConfidence(previous: Float?, current: Float): Float {
+        if (previous == null) return current
+        return (previous * 0.65f) + (current * 0.35f)
     }
 
     private fun smoothDistance(previous: Float?, current: Float?): Float? {
