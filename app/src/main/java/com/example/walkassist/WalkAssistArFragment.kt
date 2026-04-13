@@ -110,6 +110,11 @@ class WalkAssistArFragment : ArFragment() {
         val timestampNanos: Long,
     )
 
+    private data class CrosswalkVisionState(
+        val result: CrosswalkPatternResult,
+        val timestampNanos: Long,
+    )
+
     private enum class HitSource {
         FLOOR,
         WALL,
@@ -132,6 +137,7 @@ class WalkAssistArFragment : ArFragment() {
 
     private val objectAnalyzer by lazy { ObjectAnalyzer(requireContext().applicationContext) }
     private val floorSegmenter by lazy { ModelFloorSegmenter(requireContext().applicationContext) }
+    private val crosswalkPatternDetector by lazy { CrosswalkPatternDetector() }
     private val objectTracker = ObjectTracker()
     private val detectorExecutor = Executors.newSingleThreadExecutor()
     private val detectionInFlight = AtomicBoolean(false)
@@ -139,6 +145,8 @@ class WalkAssistArFragment : ArFragment() {
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
     @Volatile
     private var lastFloorMaskState: FloorMaskState? = null
+    @Volatile
+    private var lastCrosswalkState: CrosswalkVisionState? = null
     private val objectMotionMemory = mutableMapOf<Int, ObjectMotionMemory>()
     private val worldLocalMap = WorldLocalMap(
         halfRangeMeters = 5f,
@@ -229,6 +237,7 @@ class WalkAssistArFragment : ArFragment() {
         val pitchDownDegrees = computePitchDownDegrees(frame)
         val corridorHits = sampleWorldCorridor(frame)
         val floorMaskState = currentFloorMaskState(frame.timestamp)
+        val crosswalkState = currentCrosswalkState(frame.timestamp)
         val rawDepthHits = sampleRawDepthCorridor(frame)
         val cameraPose = frame.camera.displayOrientedPose
         val mapObservations = (corridorHits + rawDepthHits).map {
@@ -406,6 +415,11 @@ class WalkAssistArFragment : ArFragment() {
                 guidanceLabel = guidanceLabel,
                 statusLabel = statusLabel,
                 statusLevel = level,
+                crosswalkDetected = crosswalkState?.detected == true,
+                crosswalkScore = crosswalkState?.score ?: 0f,
+                crosswalkStripeCount = crosswalkState?.stripeCount ?: 0,
+                crosswalkYoloConfidence = crosswalkState?.yoloConfidence ?: 0f,
+                crosswalkModeLabel = crosswalkState?.modeLabel.orEmpty(),
                 objectDetections = overlayDetections,
                 planeDetections = emptyList(),
                 planePolygons = emptyList(),
@@ -464,6 +478,7 @@ class WalkAssistArFragment : ArFragment() {
         val rotationDegrees = displayRotationDegrees()
         val localFloorSegmenter = floorSegmenter
         val localObjectAnalyzer = objectAnalyzer
+        val localCrosswalkDetector = crosswalkPatternDetector
 
         lastDetectionStartedAtMs = now
         detectionInFlight.set(true)
@@ -483,6 +498,17 @@ class WalkAssistArFragment : ArFragment() {
                 } else {
                     emptyList()
                 }
+                val yoloCrosswalkConfidence = detectedObjects
+                    .filter { it.label.equals("crosswalk", ignoreCase = true) }
+                    .maxOfOrNull { it.confidence } ?: 0f
+                lastCrosswalkState = CrosswalkVisionState(
+                    result = localCrosswalkDetector.detect(
+                        bitmap = bitmap,
+                        floorSegmentation = floorSegmentation,
+                        yoloConfidence = yoloCrosswalkConfidence,
+                    ),
+                    timestampNanos = frame.timestamp,
+                )
                 val trackedDetections = objectTracker.update(
                     detections = detectedObjects.map { detection ->
                         DetectedObjectResult(
@@ -614,6 +640,12 @@ class WalkAssistArFragment : ArFragment() {
         val state = lastFloorMaskState ?: return null
         val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
         return if (ageSeconds in 0f..2.0f && state.segmentation.confidence >= 0.25f) state else null
+    }
+
+    private fun currentCrosswalkState(frameTimestampNanos: Long): CrosswalkPatternResult? {
+        val state = lastCrosswalkState ?: return null
+        val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
+        return if (ageSeconds in 0f..2.5f) state.result else null
     }
 
     private fun isInsideWalkableFloorMask(

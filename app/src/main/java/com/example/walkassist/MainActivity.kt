@@ -182,6 +182,15 @@ private fun MeasurementOverlay(state: ArMeasurementState) {
                     fontWeight = FontWeight.Medium,
                 )
             }
+            if (state.crosswalkDetected) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "횡단보도 감지 ${formatMapScore(state.crosswalkScore)}점",
+                    color = Color(0xFFB6E7FF),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = state.statusLabel,
@@ -502,6 +511,10 @@ private fun DebugOverlay(
         Text(
             "Map R ${formatMapScore(state.worldMapRightOpenScore)}/${state.worldMapRightFreeSpaceMeters?.let(::formatMetersShort) ?: "-"}",
             color = Color(0xFFD9E2EA),
+        )
+        Text(
+            "Crosswalk ${if (state.crosswalkDetected) "yes" else "no"} ${formatMapScore(state.crosswalkScore)} stripes ${state.crosswalkStripeCount} yolo ${formatMapScore(state.crosswalkYoloConfidence)} ${state.crosswalkModeLabel}",
+            color = if (state.crosswalkDetected) Color(0xFFB6E7FF) else Color(0xFFD9E2EA),
         )
         Text(
             state.statusLabel,
