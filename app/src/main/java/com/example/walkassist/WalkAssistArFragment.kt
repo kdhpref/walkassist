@@ -92,6 +92,18 @@ class WalkAssistArFragment : ArFragment() {
         val confidence: Float,
     )
 
+    private data class FloorMaskState(
+        val segmentation: FloorSegmentationResult,
+        val imageWidth: Int,
+        val imageHeight: Int,
+        val timestampNanos: Long,
+    )
+
+    private data class TtcRiskResult(
+        val label: String,
+        val timeToCollisionSeconds: Float?,
+    )
+
     private enum class HitSource {
         FLOOR,
         WALL,
@@ -113,11 +125,14 @@ class WalkAssistArFragment : ArFragment() {
     private var lastCameraZ: Float? = null
 
     private val objectAnalyzer by lazy { ObjectAnalyzer(requireContext().applicationContext) }
+    private val floorSegmenter by lazy { ModelFloorSegmenter(requireContext().applicationContext) }
     private val objectTracker = ObjectTracker()
     private val detectorExecutor = Executors.newSingleThreadExecutor()
     private val detectionInFlight = AtomicBoolean(false)
     private var lastDetectionStartedAtMs = 0L
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
+    @Volatile
+    private var lastFloorMaskState: FloorMaskState? = null
     private val worldLocalMap = WorldLocalMap(
         halfRangeMeters = 5f,
         cellSizeMeters = 0.2f,
@@ -161,7 +176,7 @@ class WalkAssistArFragment : ArFragment() {
     private fun publishFrameState() {
         val frame = arSceneView.arFrame ?: return
         val camera = frame.camera
-        scheduleObjectDetection(frame)
+        scheduleVisionAnalysis(frame)
         val trackedPlanes = arSceneView.session?.getAllTrackables(Plane::class.java).orEmpty()
         val horizontalPlaneCount = trackedPlanes.count {
             it.trackingState == TrackingState.TRACKING && it.type == Plane.Type.HORIZONTAL_UPWARD_FACING
@@ -206,6 +221,7 @@ class WalkAssistArFragment : ArFragment() {
 
         val pitchDownDegrees = computePitchDownDegrees(frame)
         val corridorHits = sampleWorldCorridor(frame)
+        val floorMaskState = currentFloorMaskState(frame.timestamp)
         val rawDepthHits = sampleRawDepthCorridor(frame)
         val overlayDetections = enrichObjectDetections(frame, lastObjectDetections)
         val nearestPersonDetection = overlayDetections
@@ -248,11 +264,10 @@ class WalkAssistArFragment : ArFragment() {
         val voxelSnapshot = emptyList<VoxelColumnUi>()
         val voxelPoints = emptyList<VoxelPointUi>()
         val voxelOverlayPoints = emptyList<VoxelOverlayPointUi>()
-        val voxelLaneMetrics = VoxelLaneMetrics(null, null, null, null, 0f, 0f, 0f)
 
-        val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left")
-        val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center")
-        val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right")
+        val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left", floorMaskState)
+        val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center", floorMaskState)
+        val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right", floorMaskState)
 
         val floorDistance = listOfNotNull(leftLane.floor, centerLane.floor, rightLane.floor).minOrNull()
         val wallDistance = listOfNotNull(leftLane.wall, centerLane.wall, rightLane.wall).minOrNull()
@@ -295,7 +310,8 @@ class WalkAssistArFragment : ArFragment() {
 
         val motionSpeed = computeMotionSpeed(frame)
         val approachSpeed = computeApproachSpeed(collisionDistance)
-        val riskLabel = computeRiskLabel(collisionDistance, approachSpeed, motionSpeed)
+        val ttcRisk = computeTtcRisk(collisionDistance, approachSpeed, motionSpeed)
+        val riskLabel = ttcRisk.label
         val sensingConfidenceScore = computeSensingConfidenceScore(
             horizontalPlaneCount = horizontalPlaneCount,
             verticalPlaneCount = verticalPlaneCount,
@@ -373,6 +389,7 @@ class WalkAssistArFragment : ArFragment() {
                 collisionDistanceMeters = collisionDistance,
                 approachSpeedMetersPerSecond = approachSpeed,
                 motionMetersPerSecond = motionSpeed,
+                timeToCollisionSeconds = ttcRisk.timeToCollisionSeconds,
                 riskLabel = riskLabel,
                 guidanceLabel = guidanceLabel,
                 statusLabel = statusLabel,
@@ -401,8 +418,7 @@ class WalkAssistArFragment : ArFragment() {
         )
     }
 
-    private fun scheduleObjectDetection(frame: Frame) {
-        if (!objectAnalyzer.isReady()) return
+    private fun scheduleVisionAnalysis(frame: Frame) {
         if (detectionInFlight.get()) return
 
         val now = SystemClock.elapsedRealtime()
@@ -416,6 +432,8 @@ class WalkAssistArFragment : ArFragment() {
             return
         }
         val rotationDegrees = displayRotationDegrees()
+        val localFloorSegmenter = floorSegmenter
+        val localObjectAnalyzer = objectAnalyzer
 
         lastDetectionStartedAtMs = now
         detectionInFlight.set(true)
@@ -423,8 +441,20 @@ class WalkAssistArFragment : ArFragment() {
             try {
                 val bitmap = image.toUprightBitmap(rotationDegrees)
                 image.close()
+                val floorSegmentation = localFloorSegmenter.segment(bitmap)
+                lastFloorMaskState = FloorMaskState(
+                    segmentation = floorSegmentation,
+                    imageWidth = bitmap.width,
+                    imageHeight = bitmap.height,
+                    timestampNanos = frame.timestamp,
+                )
+                val detectedObjects = if (localObjectAnalyzer.isReady()) {
+                    localObjectAnalyzer.detect(bitmap)
+                } else {
+                    emptyList()
+                }
                 val trackedDetections = objectTracker.update(
-                    detections = objectAnalyzer.detect(bitmap).map { detection ->
+                    detections = detectedObjects.map { detection ->
                         DetectedObjectResult(
                             boundingBox = detection.boundingBox,
                             confidence = detection.confidence,
@@ -512,27 +542,33 @@ class WalkAssistArFragment : ArFragment() {
         hits: List<CorridorHit>,
         rawDepthHits: List<CorridorHit>,
         lane: String,
+        floorMaskState: FloorMaskState?,
     ): LaneDistances {
         val filtered = hits.filter { classifyLane(it.lateralMeters) == lane }
-        val rawDepth = robustLaneRawDepthDistance(rawDepthHits, lane)
+        val obstacleHits = filtered.filter {
+            it.source != HitSource.FLOOR && !isInsideWalkableFloorMask(it, floorMaskState)
+        }
+        val rawDepth = robustLaneRawDepthDistance(rawDepthHits, lane, floorMaskState)
         val floor = filtered.filter { it.source == HitSource.FLOOR }.minOfOrNull { it.distanceMeters }
-        val wall = filtered.filter { it.source == HitSource.WALL }.minOfOrNull { it.distanceMeters }
-        val depth = filtered.filter { it.source == HitSource.DEPTH }.minOfOrNull { it.distanceMeters }
+        val wall = obstacleHits.filter { it.source == HitSource.WALL }.minOfOrNull { it.distanceMeters }
+        val depth = obstacleHits.filter { it.source == HitSource.DEPTH }.minOfOrNull { it.distanceMeters }
         return LaneDistances(
             floor = floor,
             wall = wall,
             depth = depth,
             rawDepth = rawDepth,
-            collision = listOfNotNull(floor, wall, depth, rawDepth).minOrNull(),
+            collision = listOfNotNull(wall, depth, rawDepth).minOrNull(),
         )
     }
 
     private fun robustLaneRawDepthDistance(
         rawDepthHits: List<CorridorHit>,
         lane: String,
+        floorMaskState: FloorMaskState?,
     ): Float? {
         val laneDistances = rawDepthHits
             .filter { classifyLane(it.lateralMeters) == lane }
+            .filterNot { isInsideWalkableFloorMask(it, floorMaskState) }
             .map { it.distanceMeters }
             .sorted()
 
@@ -541,6 +577,28 @@ class WalkAssistArFragment : ArFragment() {
         // Avoid using the single nearest raw-depth point because it is often a flickering outlier.
         val percentileIndex = ((laneDistances.size - 1) * 0.3f).toInt().coerceIn(0, laneDistances.lastIndex)
         return laneDistances[percentileIndex]
+    }
+
+    private fun currentFloorMaskState(frameTimestampNanos: Long): FloorMaskState? {
+        val state = lastFloorMaskState ?: return null
+        val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
+        return if (ageSeconds in 0f..2.0f && state.segmentation.confidence >= 0.25f) state else null
+    }
+
+    private fun isInsideWalkableFloorMask(
+        hit: CorridorHit,
+        floorMaskState: FloorMaskState?,
+    ): Boolean {
+        val state = floorMaskState ?: return false
+        val imageX = hit.viewXRatio * state.imageWidth.toFloat()
+        val imageY = hit.viewYRatio * state.imageHeight.toFloat()
+        val floorBoundaryY = state.segmentation.boundaryYAt(
+            imageX = imageX,
+            imageWidth = state.imageWidth,
+            imageHeight = state.imageHeight,
+        ) ?: return false
+        val floorMarginPixels = state.imageHeight * 0.025f
+        return imageY >= floorBoundaryY - floorMarginPixels
     }
 
     private fun evaluateVoxelLanes(
@@ -765,9 +823,6 @@ class WalkAssistArFragment : ArFragment() {
     ): List<ObjectOverlayDetection> {
         if (detections.isEmpty()) return emptyList()
 
-        val width = arSceneView.width.toFloat().coerceAtLeast(1f)
-        val height = arSceneView.height.toFloat().coerceAtLeast(1f)
-
         return try {
             frame.acquireRawDepthImage16Bits().use { rawDepthImage ->
                 frame.acquireRawDepthConfidenceImage().use { confidenceImage ->
@@ -871,11 +926,11 @@ class WalkAssistArFragment : ArFragment() {
 
         return buildList {
             sampleYs.forEachIndexed { yIndex, yFactor ->
-                sampleXs.forEachIndexed { xIndex, xFactor ->
+                sampleXs.forEachIndexed xLoop@{ xIndex, xFactor ->
                     if (edgeOnly) {
                         val isEdgeX = xIndex == 0 || xIndex == sampleXs.lastIndex
                         val isEdgeY = yIndex == 0 || yIndex == sampleYs.lastIndex
-                        if (!(isEdgeX || isEdgeY)) return@forEachIndexed
+                        if (!(isEdgeX || isEdgeY)) return@xLoop
                     }
                     val sampleX = width * (expandedLeft + (expandedWidth * xFactor))
                     val sampleY = height * (expandedTop + (expandedHeight * yFactor))
@@ -1376,17 +1431,31 @@ class WalkAssistArFragment : ArFragment() {
         return ((oldest - newest) / samples).coerceAtLeast(0f) * 10f
     }
 
-    private fun computeRiskLabel(
+    private fun computeTtcRisk(
         collisionDistance: Float?,
         approachSpeed: Float?,
         motionSpeed: Float?,
-    ): String {
-        if (collisionDistance == null) return "searching"
-        if (collisionDistance < 0.8f) return "critical"
-        if ((approachSpeed ?: 0f) > 0.55f && (motionSpeed ?: 0f) > 0.12f) return "critical"
-        if (collisionDistance < 1.5f || (approachSpeed ?: 0f) > 0.25f) return "high"
-        if ((motionSpeed ?: 0f) > 0.08f && collisionDistance < 2.2f) return "watch"
-        return "stable"
+    ): TtcRiskResult {
+        if (collisionDistance == null) return TtcRiskResult("searching", null)
+
+        val relativeClosingSpeed = maxOf(approachSpeed ?: 0f, motionSpeed ?: 0f)
+        val ttcSeconds = if (relativeClosingSpeed > 0.05f) {
+            (collisionDistance / relativeClosingSpeed).takeIf { it.isFinite() && it in 0.1f..12f }
+        } else {
+            null
+        }
+
+        val label = when {
+            collisionDistance < 0.55f -> "critical"
+            ttcSeconds != null && ttcSeconds <= 1.5f -> "critical"
+            collisionDistance < 0.9f -> "high"
+            ttcSeconds != null && ttcSeconds <= 3.0f -> "high"
+            ttcSeconds != null && ttcSeconds <= 5.0f -> "watch"
+            collisionDistance < 1.6f -> "watch"
+            else -> "stable"
+        }
+
+        return TtcRiskResult(label, ttcSeconds)
     }
 
     private fun computeSuggestedDirection(

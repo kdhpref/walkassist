@@ -84,6 +84,7 @@ data class ArMeasurementState(
     val collisionDistanceMeters: Float? = null,
     val approachSpeedMetersPerSecond: Float? = null,
     val motionMetersPerSecond: Float? = null,
+    val timeToCollisionSeconds: Float? = null,
     val riskLabel: String = "unknown",
     val guidanceLabel: String = "Scanning surroundings.",
     val statusLabel: String = "Move the phone slowly to detect floor and wall planes.",

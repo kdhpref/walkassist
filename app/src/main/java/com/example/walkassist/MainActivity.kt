@@ -173,6 +173,15 @@ private fun MeasurementOverlay(state: ArMeasurementState) {
                 color = confidenceColor,
                 fontSize = 13.sp,
             )
+            state.timeToCollisionSeconds?.takeIf { state.riskLabel != "stable" }?.let { ttc ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "충돌 예상 ${formatSeconds(ttc)}",
+                    color = riskColor,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = state.statusLabel,
@@ -467,7 +476,7 @@ private fun DebugOverlay(
             },
         )
         Text(
-            "Move ${state.motionMetersPerSecond?.let(::formatSpeed) ?: "-"}  Close ${state.approachSpeedMetersPerSecond?.let(::formatSpeed) ?: "-"}",
+            "Move ${state.motionMetersPerSecond?.let(::formatSpeed) ?: "-"}  Close ${state.approachSpeedMetersPerSecond?.let(::formatSpeed) ?: "-"}  TTC ${state.timeToCollisionSeconds?.let(::formatSeconds) ?: "-"}",
             color = Color(0xFFD9E2EA),
         )
         Text(
@@ -790,6 +799,10 @@ private fun formatMeters(distanceMeters: Float, isReference: Boolean = false): S
 
 private fun formatSpeed(speedMetersPerSecond: Float): String {
     return String.format("%.2f m/s", speedMetersPerSecond)
+}
+
+private fun formatSeconds(seconds: Float): String {
+    return String.format("%.1f초", seconds)
 }
 
 private fun formatMetersShort(distanceMeters: Float, isReference: Boolean = false): String {
