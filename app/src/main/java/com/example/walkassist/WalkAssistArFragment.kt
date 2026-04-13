@@ -230,21 +230,6 @@ class WalkAssistArFragment : ArFragment() {
         val corridorHits = sampleWorldCorridor(frame)
         val floorMaskState = currentFloorMaskState(frame.timestamp)
         val rawDepthHits = sampleRawDepthCorridor(frame)
-        val overlayDetections = updateObjectMotionTags(
-            detections = enrichObjectDetections(frame, lastObjectDetections),
-            timestampNanos = frame.timestamp,
-        )
-        val nearestPersonDetection = overlayDetections
-            .filter {
-                it.label.equals("person", ignoreCase = true) &&
-                    it.distanceMeters != null &&
-                    !it.distanceIsReference
-            }
-            .sortedWith(
-                compareBy<ObjectOverlayDetection> { if (it.isStable) 0 else 1 }
-                    .thenBy { it.distanceMeters ?: Float.MAX_VALUE },
-            )
-            .firstOrNull()
         val cameraPose = frame.camera.displayOrientedPose
         val mapObservations = (corridorHits + rawDepthHits).map {
             WorldMapObservation(
@@ -271,6 +256,23 @@ class WalkAssistArFragment : ArFragment() {
             cameraZAxisX = cameraPose.zAxis[0],
             cameraZAxisZ = cameraPose.zAxis[2],
         )
+        val worldMapLaneMetrics = evaluateWorldMapLanes(worldMapSnapshot)
+        val overlayDetections = updateObjectMotionTags(
+            detections = enrichObjectDetections(frame, lastObjectDetections),
+            timestampNanos = frame.timestamp,
+            worldMapLaneMetrics = worldMapLaneMetrics,
+        )
+        val nearestPersonDetection = overlayDetections
+            .filter {
+                it.label.equals("person", ignoreCase = true) &&
+                    it.distanceMeters != null &&
+                    !it.distanceIsReference
+            }
+            .sortedWith(
+                compareBy<ObjectOverlayDetection> { if (it.isStable) 0 else 1 }
+                    .thenBy { it.distanceMeters ?: Float.MAX_VALUE },
+            )
+            .firstOrNull()
         val voxelSnapshot = emptyList<VoxelColumnUi>()
         val voxelPoints = emptyList<VoxelPointUi>()
         val voxelOverlayPoints = emptyList<VoxelOverlayPointUi>()
@@ -918,6 +920,7 @@ class WalkAssistArFragment : ArFragment() {
     private fun updateObjectMotionTags(
         detections: List<ObjectOverlayDetection>,
         timestampNanos: Long,
+        worldMapLaneMetrics: WorldMapLaneMetrics,
     ): List<ObjectOverlayDetection> {
         if (detections.isEmpty()) {
             objectMotionMemory.clear()
@@ -967,6 +970,7 @@ class WalkAssistArFragment : ArFragment() {
             val avoidanceLabel = suggestAvoidanceForObject(
                 lane = detection.lane,
                 motionDirectionLabel = motionLabel,
+                worldMapLaneMetrics = worldMapLaneMetrics,
             )
 
             detection.copy(
@@ -1001,8 +1005,9 @@ class WalkAssistArFragment : ArFragment() {
     private fun suggestAvoidanceForObject(
         lane: String?,
         motionDirectionLabel: String,
+        worldMapLaneMetrics: WorldMapLaneMetrics,
     ): String? {
-        return when (lane) {
+        val candidate = when (lane) {
             "left" -> "right"
             "right" -> "left"
             "center" -> when (motionDirectionLabel) {
@@ -1013,6 +1018,83 @@ class WalkAssistArFragment : ArFragment() {
             }
             else -> null
         }
+        return validateAvoidanceWithLocalMap(candidate, worldMapLaneMetrics)
+    }
+
+    private fun validateAvoidanceWithLocalMap(
+        candidate: String?,
+        worldMapLaneMetrics: WorldMapLaneMetrics,
+    ): String? {
+        if (candidate == null) return null
+        if (candidate == "stop_or_sidestep") {
+            val leftOpen = isLaneOpenForAvoidance(
+                freeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
+                occupancyRatio = worldMapLaneMetrics.leftOccupancyRatio,
+                nearestDistance = worldMapLaneMetrics.leftDistance,
+            )
+            val rightOpen = isLaneOpenForAvoidance(
+                freeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
+                occupancyRatio = worldMapLaneMetrics.rightOccupancyRatio,
+                nearestDistance = worldMapLaneMetrics.rightDistance,
+            )
+            return when {
+                leftOpen && rightOpen -> chooseMoreOpenSide(worldMapLaneMetrics)
+                leftOpen -> "left"
+                rightOpen -> "right"
+                else -> "stop_or_sidestep"
+            }
+        }
+
+        val isOpen = when (candidate) {
+            "left" -> isLaneOpenForAvoidance(
+                freeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
+                occupancyRatio = worldMapLaneMetrics.leftOccupancyRatio,
+                nearestDistance = worldMapLaneMetrics.leftDistance,
+            )
+            "right" -> isLaneOpenForAvoidance(
+                freeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
+                occupancyRatio = worldMapLaneMetrics.rightOccupancyRatio,
+                nearestDistance = worldMapLaneMetrics.rightDistance,
+            )
+            else -> false
+        }
+        return if (isOpen) candidate else "stop_or_sidestep"
+    }
+
+    private fun isLaneOpenForAvoidance(
+        freeSpaceMeters: Float?,
+        occupancyRatio: Float,
+        nearestDistance: Float?,
+    ): Boolean {
+        val hasEnoughFreeSpace = (freeSpaceMeters ?: 0f) >= 1.6f
+        val hasLowOccupancy = occupancyRatio <= 0.22f
+        val nearestObstacleIsNotImmediate = nearestDistance == null || nearestDistance >= 1.2f
+        return hasEnoughFreeSpace && hasLowOccupancy && nearestObstacleIsNotImmediate
+    }
+
+    private fun chooseMoreOpenSide(worldMapLaneMetrics: WorldMapLaneMetrics): String {
+        val leftScore = laneOpennessScore(
+            freeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
+            occupancyRatio = worldMapLaneMetrics.leftOccupancyRatio,
+            nearestDistance = worldMapLaneMetrics.leftDistance,
+        )
+        val rightScore = laneOpennessScore(
+            freeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
+            occupancyRatio = worldMapLaneMetrics.rightOccupancyRatio,
+            nearestDistance = worldMapLaneMetrics.rightDistance,
+        )
+        return if (leftScore >= rightScore) "left" else "right"
+    }
+
+    private fun laneOpennessScore(
+        freeSpaceMeters: Float?,
+        occupancyRatio: Float,
+        nearestDistance: Float?,
+    ): Float {
+        val freeScore = (freeSpaceMeters ?: 0f).coerceIn(0f, 5f) / 5f
+        val occupancyScore = 1f - occupancyRatio.coerceIn(0f, 1f)
+        val nearestScore = (nearestDistance ?: 5f).coerceIn(0f, 5f) / 5f
+        return (freeScore * 0.5f) + (occupancyScore * 0.3f) + (nearestScore * 0.2f)
     }
 
     private fun sampleBoxDepthHits(
