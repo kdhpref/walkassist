@@ -416,6 +416,24 @@ class WalkAssistArFragment : ArFragment() {
                 worldMapOccupiedCells = worldLocalMap.occupiedCellCount(),
                 worldMapObservationCount = worldLocalMap.totalObservationCount(),
                 worldMapConfidenceScore = worldLocalMap.averageConfidenceScore(),
+                worldMapLeftOpenScore = laneOpennessScore(
+                    freeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
+                    occupancyRatio = worldMapLaneMetrics.leftOccupancyRatio,
+                    nearestDistance = worldMapLaneMetrics.leftDistance,
+                ),
+                worldMapCenterOpenScore = laneOpennessScore(
+                    freeSpaceMeters = worldMapLaneMetrics.centerFreeSpaceMeters,
+                    occupancyRatio = worldMapLaneMetrics.centerOccupancyRatio,
+                    nearestDistance = worldMapLaneMetrics.centerDistance,
+                ),
+                worldMapRightOpenScore = laneOpennessScore(
+                    freeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
+                    occupancyRatio = worldMapLaneMetrics.rightOccupancyRatio,
+                    nearestDistance = worldMapLaneMetrics.rightDistance,
+                ),
+                worldMapLeftFreeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
+                worldMapCenterFreeSpaceMeters = worldMapLaneMetrics.centerFreeSpaceMeters,
+                worldMapRightFreeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
                 voxelColumns = voxelSnapshot,
                 voxelPoints = voxelPoints,
                 voxelOverlayPoints = voxelOverlayPoints,
@@ -1027,16 +1045,8 @@ class WalkAssistArFragment : ArFragment() {
     ): String? {
         if (candidate == null) return null
         if (candidate == "stop_or_sidestep") {
-            val leftOpen = isLaneOpenForAvoidance(
-                freeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
-                occupancyRatio = worldMapLaneMetrics.leftOccupancyRatio,
-                nearestDistance = worldMapLaneMetrics.leftDistance,
-            )
-            val rightOpen = isLaneOpenForAvoidance(
-                freeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
-                occupancyRatio = worldMapLaneMetrics.rightOccupancyRatio,
-                nearestDistance = worldMapLaneMetrics.rightDistance,
-            )
+            val leftOpen = isLaneOpenForAvoidance("left", worldMapLaneMetrics)
+            val rightOpen = isLaneOpenForAvoidance("right", worldMapLaneMetrics)
             return when {
                 leftOpen && rightOpen -> chooseMoreOpenSide(worldMapLaneMetrics)
                 leftOpen -> "left"
@@ -1046,30 +1056,46 @@ class WalkAssistArFragment : ArFragment() {
         }
 
         val isOpen = when (candidate) {
-            "left" -> isLaneOpenForAvoidance(
-                freeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
-                occupancyRatio = worldMapLaneMetrics.leftOccupancyRatio,
-                nearestDistance = worldMapLaneMetrics.leftDistance,
-            )
-            "right" -> isLaneOpenForAvoidance(
-                freeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
-                occupancyRatio = worldMapLaneMetrics.rightOccupancyRatio,
-                nearestDistance = worldMapLaneMetrics.rightDistance,
-            )
+            "left", "right", "center" -> isLaneOpenForAvoidance(candidate, worldMapLaneMetrics)
             else -> false
         }
-        return if (isOpen) candidate else "stop_or_sidestep"
+        if (isOpen) return candidate
+
+        val centerFallbackOpen = candidate != "center" && isLaneOpenForAvoidance("center", worldMapLaneMetrics)
+        return if (centerFallbackOpen) "center" else "stop_or_sidestep"
     }
 
     private fun isLaneOpenForAvoidance(
-        freeSpaceMeters: Float?,
-        occupancyRatio: Float,
-        nearestDistance: Float?,
+        lane: String,
+        worldMapLaneMetrics: WorldMapLaneMetrics,
     ): Boolean {
-        val hasEnoughFreeSpace = (freeSpaceMeters ?: 0f) >= 1.6f
-        val hasLowOccupancy = occupancyRatio <= 0.22f
+        val freeSpaceMeters = when (lane) {
+            "left" -> worldMapLaneMetrics.leftFreeSpaceMeters
+            "center" -> worldMapLaneMetrics.centerFreeSpaceMeters
+            "right" -> worldMapLaneMetrics.rightFreeSpaceMeters
+            else -> null
+        }
+        val occupancyRatio = when (lane) {
+            "left" -> worldMapLaneMetrics.leftOccupancyRatio
+            "center" -> worldMapLaneMetrics.centerOccupancyRatio
+            "right" -> worldMapLaneMetrics.rightOccupancyRatio
+            else -> 1f
+        }
+        val nearestDistance = when (lane) {
+            "left" -> worldMapLaneMetrics.leftDistance
+            "center" -> worldMapLaneMetrics.centerDistance
+            "right" -> worldMapLaneMetrics.rightDistance
+            else -> 0f
+        }
+        val opennessScore = laneOpennessScore(
+            freeSpaceMeters = freeSpaceMeters,
+            occupancyRatio = occupancyRatio,
+            nearestDistance = nearestDistance,
+        )
+        val hasEnoughFreeSpace = (freeSpaceMeters ?: 0f) >= 2.0f
+        val hasLowOccupancy = occupancyRatio <= 0.18f
         val nearestObstacleIsNotImmediate = nearestDistance == null || nearestDistance >= 1.2f
-        return hasEnoughFreeSpace && hasLowOccupancy && nearestObstacleIsNotImmediate
+        return opennessScore >= 0.58f && hasEnoughFreeSpace && hasLowOccupancy && nearestObstacleIsNotImmediate
     }
 
     private fun chooseMoreOpenSide(worldMapLaneMetrics: WorldMapLaneMetrics): String {

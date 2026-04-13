@@ -492,6 +492,18 @@ private fun DebugOverlay(
             color = Color(0xFFD9E2EA),
         )
         Text(
+            "Map L ${formatMapScore(state.worldMapLeftOpenScore)}/${state.worldMapLeftFreeSpaceMeters?.let(::formatMetersShort) ?: "-"}",
+            color = Color(0xFFD9E2EA),
+        )
+        Text(
+            "Map C ${formatMapScore(state.worldMapCenterOpenScore)}/${state.worldMapCenterFreeSpaceMeters?.let(::formatMetersShort) ?: "-"}",
+            color = Color(0xFFD9E2EA),
+        )
+        Text(
+            "Map R ${formatMapScore(state.worldMapRightOpenScore)}/${state.worldMapRightFreeSpaceMeters?.let(::formatMetersShort) ?: "-"}",
+            color = Color(0xFFD9E2EA),
+        )
+        Text(
             state.statusLabel,
             color = when (state.statusLevel) {
                 ArStatusLevel.DANGER -> Color(0xFFFF9CA8)
@@ -817,6 +829,10 @@ private fun formatSeconds(seconds: Float): String {
     return String.format("%.1f초", seconds)
 }
 
+private fun formatMapScore(score: Float): String {
+    return "${(score.coerceIn(0f, 1f) * 100f).toInt()}"
+}
+
 private fun formatMetersShort(distanceMeters: Float, isReference: Boolean = false): String {
     if (isReference) return "5m+"
     return if (distanceMeters < 1f) {
@@ -841,6 +857,7 @@ private fun presentableMotion(label: String): String {
 private fun presentableAvoidance(label: String): String {
     return when (label) {
         "left" -> "좌측 회피"
+        "center" -> "중앙 유지"
         "right" -> "우측 회피"
         "stop_or_sidestep" -> "정지/회피"
         else -> ""
