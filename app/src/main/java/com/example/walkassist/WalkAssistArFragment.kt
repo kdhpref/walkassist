@@ -104,6 +104,12 @@ class WalkAssistArFragment : ArFragment() {
         val timeToCollisionSeconds: Float?,
     )
 
+    private data class ObjectMotionMemory(
+        val centerXRatio: Float,
+        val distanceMeters: Float?,
+        val timestampNanos: Long,
+    )
+
     private enum class HitSource {
         FLOOR,
         WALL,
@@ -133,6 +139,7 @@ class WalkAssistArFragment : ArFragment() {
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
     @Volatile
     private var lastFloorMaskState: FloorMaskState? = null
+    private val objectMotionMemory = mutableMapOf<Int, ObjectMotionMemory>()
     private val worldLocalMap = WorldLocalMap(
         halfRangeMeters = 5f,
         cellSizeMeters = 0.2f,
@@ -223,7 +230,10 @@ class WalkAssistArFragment : ArFragment() {
         val corridorHits = sampleWorldCorridor(frame)
         val floorMaskState = currentFloorMaskState(frame.timestamp)
         val rawDepthHits = sampleRawDepthCorridor(frame)
-        val overlayDetections = enrichObjectDetections(frame, lastObjectDetections)
+        val overlayDetections = updateObjectMotionTags(
+            detections = enrichObjectDetections(frame, lastObjectDetections),
+            timestampNanos = frame.timestamp,
+        )
         val nearestPersonDetection = overlayDetections
             .filter {
                 it.label.equals("person", ignoreCase = true) &&
@@ -492,6 +502,7 @@ class WalkAssistArFragment : ArFragment() {
                             confidence = detection.confidence,
                             lane = classifyScreenLane(centerXRatio),
                             isStable = detection.trackingState?.isStable == true,
+                            trackId = detection.trackingState?.trackId,
                         )
                     }
                 lastObjectDetections = prioritizedDetections
@@ -902,6 +913,106 @@ class WalkAssistArFragment : ArFragment() {
             distanceMeters = innerHits.map { it.distanceMeters }.average().toFloat(),
             isReference = false,
         )
+    }
+
+    private fun updateObjectMotionTags(
+        detections: List<ObjectOverlayDetection>,
+        timestampNanos: Long,
+    ): List<ObjectOverlayDetection> {
+        if (detections.isEmpty()) {
+            objectMotionMemory.clear()
+            return emptyList()
+        }
+
+        val activeTrackIds = detections.mapNotNull { it.trackId }.toSet()
+        objectMotionMemory.keys.removeAll { it !in activeTrackIds }
+
+        return detections.map { detection ->
+            val trackId = detection.trackId
+            val centerXRatio = (detection.leftRatio + (detection.widthRatio * 0.5f)).coerceIn(0f, 1f)
+            if (trackId == null) {
+                return@map detection
+            }
+
+            val previous = objectMotionMemory[trackId]
+            objectMotionMemory[trackId] = ObjectMotionMemory(
+                centerXRatio = centerXRatio,
+                distanceMeters = detection.distanceMeters?.takeUnless { detection.distanceIsReference },
+                timestampNanos = timestampNanos,
+            )
+
+            val currentDistance = detection.distanceMeters?.takeUnless { detection.distanceIsReference }
+            val dtSeconds = previous?.let { (timestampNanos - it.timestampNanos) / 1_000_000_000f }
+            val centerDelta = previous?.let { centerXRatio - it.centerXRatio } ?: 0f
+            val closingSpeed = if (
+                previous?.distanceMeters != null &&
+                currentDistance != null &&
+                dtSeconds != null &&
+                dtSeconds > 0.08f
+            ) {
+                ((previous.distanceMeters - currentDistance) / dtSeconds).takeIf { it.isFinite() }
+            } else {
+                null
+            }
+            val positiveClosingSpeed = closingSpeed?.coerceAtLeast(0f)
+            val ttcSeconds = if (currentDistance != null && positiveClosingSpeed != null && positiveClosingSpeed > 0.05f) {
+                (currentDistance / positiveClosingSpeed).takeIf { it.isFinite() && it in 0.1f..12f }
+            } else {
+                null
+            }
+            val motionLabel = classifyObjectMotion(
+                centerDelta = centerDelta,
+                closingSpeed = closingSpeed,
+            )
+            val avoidanceLabel = suggestAvoidanceForObject(
+                lane = detection.lane,
+                motionDirectionLabel = motionLabel,
+            )
+
+            detection.copy(
+                objectTimeToCollisionSeconds = ttcSeconds,
+                objectClosingSpeedMetersPerSecond = positiveClosingSpeed,
+                motionDirectionLabel = motionLabel,
+                avoidanceDirectionLabel = avoidanceLabel,
+            )
+        }
+    }
+
+    private fun classifyObjectMotion(
+        centerDelta: Float,
+        closingSpeed: Float?,
+    ): String {
+        val horizontalMotion = when {
+            centerDelta > 0.035f -> "right"
+            centerDelta < -0.035f -> "left"
+            else -> null
+        }
+        return when {
+            (closingSpeed ?: 0f) > 0.18f && horizontalMotion == "right" -> "approaching_right"
+            (closingSpeed ?: 0f) > 0.18f && horizontalMotion == "left" -> "approaching_left"
+            (closingSpeed ?: 0f) > 0.18f -> "approaching"
+            (closingSpeed ?: 0f) < -0.18f -> "receding"
+            horizontalMotion == "right" -> "moving_right"
+            horizontalMotion == "left" -> "moving_left"
+            else -> "stationary"
+        }
+    }
+
+    private fun suggestAvoidanceForObject(
+        lane: String?,
+        motionDirectionLabel: String,
+    ): String? {
+        return when (lane) {
+            "left" -> "right"
+            "right" -> "left"
+            "center" -> when (motionDirectionLabel) {
+                "approaching_right", "moving_right" -> "left"
+                "approaching_left", "moving_left" -> "right"
+                "approaching" -> "stop_or_sidestep"
+                else -> null
+            }
+            else -> null
+        }
     }
 
     private fun sampleBoxDepthHits(

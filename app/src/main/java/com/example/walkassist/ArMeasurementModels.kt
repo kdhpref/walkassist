@@ -18,6 +18,11 @@ data class ObjectOverlayDetection(
     val distanceIsReference: Boolean = false,
     val lane: String? = null,
     val isStable: Boolean = false,
+    val trackId: Int? = null,
+    val objectTimeToCollisionSeconds: Float? = null,
+    val objectClosingSpeedMetersPerSecond: Float? = null,
+    val motionDirectionLabel: String? = null,
+    val avoidanceDirectionLabel: String? = null,
 )
 
 data class PlaneOverlayDetection(

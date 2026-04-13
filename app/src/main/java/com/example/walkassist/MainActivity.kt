@@ -412,6 +412,18 @@ private fun ObjectDetectionOverlay(
                             append(" ")
                             append(formatMetersShort(it, detection.distanceIsReference))
                         }
+                        detection.objectTimeToCollisionSeconds?.let {
+                            append(" TTC ")
+                            append(formatSeconds(it))
+                        }
+                        detection.motionDirectionLabel?.let {
+                            append(" ")
+                            append(presentableMotion(it))
+                        }
+                        detection.avoidanceDirectionLabel?.let {
+                            append(" ")
+                            append(presentableAvoidance(it))
+                        }
                         append(" ")
                         append((detection.confidence * 100f).toInt())
                         append("%")
@@ -811,5 +823,26 @@ private fun formatMetersShort(distanceMeters: Float, isReference: Boolean = fals
         "${(distanceMeters * 100f).toInt()}c"
     } else {
         String.format("%.1fm", distanceMeters)
+    }
+}
+
+private fun presentableMotion(label: String): String {
+    return when (label) {
+        "approaching_right" -> "접근/우"
+        "approaching_left" -> "접근/좌"
+        "approaching" -> "접근"
+        "moving_right" -> "우측 이동"
+        "moving_left" -> "좌측 이동"
+        "receding" -> "멀어짐"
+        else -> ""
+    }
+}
+
+private fun presentableAvoidance(label: String): String {
+    return when (label) {
+        "left" -> "좌측 회피"
+        "right" -> "우측 회피"
+        "stop_or_sidestep" -> "정지/회피"
+        else -> ""
     }
 }
