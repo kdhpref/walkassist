@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#050505">
+
+    <androidx.camera.view.PreviewView
+        android:id="@+id/ocrPreview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="문자 인식 카메라 미리보기" />
+
+    <TextView
+        android:id="@+id/ocrTextResult"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="#CC000000"
+        android:contentDescription="인식된 문자"
+        android:padding="20dp"
+        android:text="인식된 문자가 여기에 표시됩니다."
+        android:textColor="#FFFFFF"
+        android:textSize="18sp" />
+
+</FrameLayout>
