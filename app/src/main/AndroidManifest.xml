@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <uses-feature
         android:glEsVersion="0x00030000"
@@ -33,5 +34,10 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".feedback.FeedbackPreviewActivity"
+            android:exported="false"
+            android:label="WalkAssist Feedback"
+            android:theme="@style/Theme.WalkAssist" />
     </application>
 </manifest>
