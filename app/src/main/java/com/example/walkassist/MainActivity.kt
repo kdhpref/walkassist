@@ -173,6 +173,24 @@ private fun MeasurementOverlay(state: ArMeasurementState) {
                 color = confidenceColor,
                 fontSize = 13.sp,
             )
+            state.timeToCollisionSeconds?.takeIf { state.riskLabel != "stable" }?.let { ttc ->
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "충돌 예상 ${formatSeconds(ttc)}",
+                    color = riskColor,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            if (state.crosswalkDetected) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "횡단보도 감지 ${formatMapScore(state.crosswalkScore)}점",
+                    color = Color(0xFFB6E7FF),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = state.statusLabel,
@@ -403,6 +421,18 @@ private fun ObjectDetectionOverlay(
                             append(" ")
                             append(formatMetersShort(it, detection.distanceIsReference))
                         }
+                        detection.objectTimeToCollisionSeconds?.let {
+                            append(" TTC ")
+                            append(formatSeconds(it))
+                        }
+                        detection.motionDirectionLabel?.let {
+                            append(" ")
+                            append(presentableMotion(it))
+                        }
+                        detection.avoidanceDirectionLabel?.let {
+                            append(" ")
+                            append(presentableAvoidance(it))
+                        }
                         append(" ")
                         append((detection.confidence * 100f).toInt())
                         append("%")
@@ -467,8 +497,24 @@ private fun DebugOverlay(
             },
         )
         Text(
-            "Move ${state.motionMetersPerSecond?.let(::formatSpeed) ?: "-"}  Close ${state.approachSpeedMetersPerSecond?.let(::formatSpeed) ?: "-"}",
+            "Move ${state.motionMetersPerSecond?.let(::formatSpeed) ?: "-"}  Close ${state.approachSpeedMetersPerSecond?.let(::formatSpeed) ?: "-"}  TTC ${state.timeToCollisionSeconds?.let(::formatSeconds) ?: "-"}",
             color = Color(0xFFD9E2EA),
+        )
+        Text(
+            "Map L ${formatMapScore(state.worldMapLeftOpenScore)}/${state.worldMapLeftFreeSpaceMeters?.let(::formatMetersShort) ?: "-"}",
+            color = Color(0xFFD9E2EA),
+        )
+        Text(
+            "Map C ${formatMapScore(state.worldMapCenterOpenScore)}/${state.worldMapCenterFreeSpaceMeters?.let(::formatMetersShort) ?: "-"}",
+            color = Color(0xFFD9E2EA),
+        )
+        Text(
+            "Map R ${formatMapScore(state.worldMapRightOpenScore)}/${state.worldMapRightFreeSpaceMeters?.let(::formatMetersShort) ?: "-"}",
+            color = Color(0xFFD9E2EA),
+        )
+        Text(
+            "Crosswalk ${if (state.crosswalkDetected) "yes" else "no"} ${formatMapScore(state.crosswalkScore)} stripes ${state.crosswalkStripeCount} yolo ${formatMapScore(state.crosswalkYoloConfidence)} ${state.crosswalkModeLabel}",
+            color = if (state.crosswalkDetected) Color(0xFFB6E7FF) else Color(0xFFD9E2EA),
         )
         Text(
             state.statusLabel,
@@ -792,11 +838,41 @@ private fun formatSpeed(speedMetersPerSecond: Float): String {
     return String.format("%.2f m/s", speedMetersPerSecond)
 }
 
+private fun formatSeconds(seconds: Float): String {
+    return String.format("%.1f초", seconds)
+}
+
+private fun formatMapScore(score: Float): String {
+    return "${(score.coerceIn(0f, 1f) * 100f).toInt()}"
+}
+
 private fun formatMetersShort(distanceMeters: Float, isReference: Boolean = false): String {
     if (isReference) return "5m+"
     return if (distanceMeters < 1f) {
         "${(distanceMeters * 100f).toInt()}c"
     } else {
         String.format("%.1fm", distanceMeters)
+    }
+}
+
+private fun presentableMotion(label: String): String {
+    return when (label) {
+        "approaching_right" -> "접근/우"
+        "approaching_left" -> "접근/좌"
+        "approaching" -> "접근"
+        "moving_right" -> "우측 이동"
+        "moving_left" -> "좌측 이동"
+        "receding" -> "멀어짐"
+        else -> ""
+    }
+}
+
+private fun presentableAvoidance(label: String): String {
+    return when (label) {
+        "left" -> "좌측 회피"
+        "center" -> "중앙 유지"
+        "right" -> "우측 회피"
+        "stop_or_sidestep" -> "정지/회피"
+        else -> ""
     }
 }

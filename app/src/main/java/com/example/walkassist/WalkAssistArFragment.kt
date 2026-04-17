@@ -92,6 +92,29 @@ class WalkAssistArFragment : ArFragment() {
         val confidence: Float,
     )
 
+    private data class FloorMaskState(
+        val segmentation: FloorSegmentationResult,
+        val imageWidth: Int,
+        val imageHeight: Int,
+        val timestampNanos: Long,
+    )
+
+    private data class TtcRiskResult(
+        val label: String,
+        val timeToCollisionSeconds: Float?,
+    )
+
+    private data class ObjectMotionMemory(
+        val centerXRatio: Float,
+        val distanceMeters: Float?,
+        val timestampNanos: Long,
+    )
+
+    private data class CrosswalkVisionState(
+        val result: CrosswalkPatternResult,
+        val timestampNanos: Long,
+    )
+
     private enum class HitSource {
         FLOOR,
         WALL,
@@ -113,11 +136,18 @@ class WalkAssistArFragment : ArFragment() {
     private var lastCameraZ: Float? = null
 
     private val objectAnalyzer by lazy { ObjectAnalyzer(requireContext().applicationContext) }
+    private val floorSegmenter by lazy { ModelFloorSegmenter(requireContext().applicationContext) }
+    private val crosswalkPatternDetector by lazy { CrosswalkPatternDetector() }
     private val objectTracker = ObjectTracker()
     private val detectorExecutor = Executors.newSingleThreadExecutor()
     private val detectionInFlight = AtomicBoolean(false)
     private var lastDetectionStartedAtMs = 0L
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
+    @Volatile
+    private var lastFloorMaskState: FloorMaskState? = null
+    @Volatile
+    private var lastCrosswalkState: CrosswalkVisionState? = null
+    private val objectMotionMemory = mutableMapOf<Int, ObjectMotionMemory>()
     private val worldLocalMap = WorldLocalMap(
         halfRangeMeters = 5f,
         cellSizeMeters = 0.2f,
@@ -161,7 +191,7 @@ class WalkAssistArFragment : ArFragment() {
     private fun publishFrameState() {
         val frame = arSceneView.arFrame ?: return
         val camera = frame.camera
-        scheduleObjectDetection(frame)
+        scheduleVisionAnalysis(frame)
         val trackedPlanes = arSceneView.session?.getAllTrackables(Plane::class.java).orEmpty()
         val horizontalPlaneCount = trackedPlanes.count {
             it.trackingState == TrackingState.TRACKING && it.type == Plane.Type.HORIZONTAL_UPWARD_FACING
@@ -206,19 +236,9 @@ class WalkAssistArFragment : ArFragment() {
 
         val pitchDownDegrees = computePitchDownDegrees(frame)
         val corridorHits = sampleWorldCorridor(frame)
+        val floorMaskState = currentFloorMaskState(frame.timestamp)
+        val crosswalkState = currentCrosswalkState(frame.timestamp)
         val rawDepthHits = sampleRawDepthCorridor(frame)
-        val overlayDetections = enrichObjectDetections(frame, lastObjectDetections)
-        val nearestPersonDetection = overlayDetections
-            .filter {
-                it.label.equals("person", ignoreCase = true) &&
-                    it.distanceMeters != null &&
-                    !it.distanceIsReference
-            }
-            .sortedWith(
-                compareBy<ObjectOverlayDetection> { if (it.isStable) 0 else 1 }
-                    .thenBy { it.distanceMeters ?: Float.MAX_VALUE },
-            )
-            .firstOrNull()
         val cameraPose = frame.camera.displayOrientedPose
         val mapObservations = (corridorHits + rawDepthHits).map {
             WorldMapObservation(
@@ -245,14 +265,30 @@ class WalkAssistArFragment : ArFragment() {
             cameraZAxisX = cameraPose.zAxis[0],
             cameraZAxisZ = cameraPose.zAxis[2],
         )
+        val worldMapLaneMetrics = evaluateWorldMapLanes(worldMapSnapshot)
+        val overlayDetections = updateObjectMotionTags(
+            detections = enrichObjectDetections(frame, lastObjectDetections),
+            timestampNanos = frame.timestamp,
+            worldMapLaneMetrics = worldMapLaneMetrics,
+        )
+        val nearestPersonDetection = overlayDetections
+            .filter {
+                it.label.equals("person", ignoreCase = true) &&
+                    it.distanceMeters != null &&
+                    !it.distanceIsReference
+            }
+            .sortedWith(
+                compareBy<ObjectOverlayDetection> { if (it.isStable) 0 else 1 }
+                    .thenBy { it.distanceMeters ?: Float.MAX_VALUE },
+            )
+            .firstOrNull()
         val voxelSnapshot = emptyList<VoxelColumnUi>()
         val voxelPoints = emptyList<VoxelPointUi>()
         val voxelOverlayPoints = emptyList<VoxelOverlayPointUi>()
-        val voxelLaneMetrics = VoxelLaneMetrics(null, null, null, null, 0f, 0f, 0f)
 
-        val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left")
-        val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center")
-        val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right")
+        val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left", floorMaskState)
+        val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center", floorMaskState)
+        val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right", floorMaskState)
 
         val floorDistance = listOfNotNull(leftLane.floor, centerLane.floor, rightLane.floor).minOrNull()
         val wallDistance = listOfNotNull(leftLane.wall, centerLane.wall, rightLane.wall).minOrNull()
@@ -295,7 +331,8 @@ class WalkAssistArFragment : ArFragment() {
 
         val motionSpeed = computeMotionSpeed(frame)
         val approachSpeed = computeApproachSpeed(collisionDistance)
-        val riskLabel = computeRiskLabel(collisionDistance, approachSpeed, motionSpeed)
+        val ttcRisk = computeTtcRisk(collisionDistance, approachSpeed, motionSpeed)
+        val riskLabel = ttcRisk.label
         val sensingConfidenceScore = computeSensingConfidenceScore(
             horizontalPlaneCount = horizontalPlaneCount,
             verticalPlaneCount = verticalPlaneCount,
@@ -373,10 +410,16 @@ class WalkAssistArFragment : ArFragment() {
                 collisionDistanceMeters = collisionDistance,
                 approachSpeedMetersPerSecond = approachSpeed,
                 motionMetersPerSecond = motionSpeed,
+                timeToCollisionSeconds = ttcRisk.timeToCollisionSeconds,
                 riskLabel = riskLabel,
                 guidanceLabel = guidanceLabel,
                 statusLabel = statusLabel,
                 statusLevel = level,
+                crosswalkDetected = crosswalkState?.detected == true,
+                crosswalkScore = crosswalkState?.score ?: 0f,
+                crosswalkStripeCount = crosswalkState?.stripeCount ?: 0,
+                crosswalkYoloConfidence = crosswalkState?.yoloConfidence ?: 0f,
+                crosswalkModeLabel = crosswalkState?.modeLabel.orEmpty(),
                 objectDetections = overlayDetections,
                 planeDetections = emptyList(),
                 planePolygons = emptyList(),
@@ -387,6 +430,24 @@ class WalkAssistArFragment : ArFragment() {
                 worldMapOccupiedCells = worldLocalMap.occupiedCellCount(),
                 worldMapObservationCount = worldLocalMap.totalObservationCount(),
                 worldMapConfidenceScore = worldLocalMap.averageConfidenceScore(),
+                worldMapLeftOpenScore = laneOpennessScore(
+                    freeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
+                    occupancyRatio = worldMapLaneMetrics.leftOccupancyRatio,
+                    nearestDistance = worldMapLaneMetrics.leftDistance,
+                ),
+                worldMapCenterOpenScore = laneOpennessScore(
+                    freeSpaceMeters = worldMapLaneMetrics.centerFreeSpaceMeters,
+                    occupancyRatio = worldMapLaneMetrics.centerOccupancyRatio,
+                    nearestDistance = worldMapLaneMetrics.centerDistance,
+                ),
+                worldMapRightOpenScore = laneOpennessScore(
+                    freeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
+                    occupancyRatio = worldMapLaneMetrics.rightOccupancyRatio,
+                    nearestDistance = worldMapLaneMetrics.rightDistance,
+                ),
+                worldMapLeftFreeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
+                worldMapCenterFreeSpaceMeters = worldMapLaneMetrics.centerFreeSpaceMeters,
+                worldMapRightFreeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
                 voxelColumns = voxelSnapshot,
                 voxelPoints = voxelPoints,
                 voxelOverlayPoints = voxelOverlayPoints,
@@ -401,8 +462,7 @@ class WalkAssistArFragment : ArFragment() {
         )
     }
 
-    private fun scheduleObjectDetection(frame: Frame) {
-        if (!objectAnalyzer.isReady()) return
+    private fun scheduleVisionAnalysis(frame: Frame) {
         if (detectionInFlight.get()) return
 
         val now = SystemClock.elapsedRealtime()
@@ -416,6 +476,9 @@ class WalkAssistArFragment : ArFragment() {
             return
         }
         val rotationDegrees = displayRotationDegrees()
+        val localFloorSegmenter = floorSegmenter
+        val localObjectAnalyzer = objectAnalyzer
+        val localCrosswalkDetector = crosswalkPatternDetector
 
         lastDetectionStartedAtMs = now
         detectionInFlight.set(true)
@@ -423,8 +486,31 @@ class WalkAssistArFragment : ArFragment() {
             try {
                 val bitmap = image.toUprightBitmap(rotationDegrees)
                 image.close()
+                val floorSegmentation = localFloorSegmenter.segment(bitmap)
+                lastFloorMaskState = FloorMaskState(
+                    segmentation = floorSegmentation,
+                    imageWidth = bitmap.width,
+                    imageHeight = bitmap.height,
+                    timestampNanos = frame.timestamp,
+                )
+                val detectedObjects = if (localObjectAnalyzer.isReady()) {
+                    localObjectAnalyzer.detect(bitmap)
+                } else {
+                    emptyList()
+                }
+                val yoloCrosswalkConfidence = detectedObjects
+                    .filter { it.label.equals("crosswalk", ignoreCase = true) }
+                    .maxOfOrNull { it.confidence } ?: 0f
+                lastCrosswalkState = CrosswalkVisionState(
+                    result = localCrosswalkDetector.detect(
+                        bitmap = bitmap,
+                        floorSegmentation = floorSegmentation,
+                        yoloConfidence = yoloCrosswalkConfidence,
+                    ),
+                    timestampNanos = frame.timestamp,
+                )
                 val trackedDetections = objectTracker.update(
-                    detections = objectAnalyzer.detect(bitmap).map { detection ->
+                    detections = detectedObjects.map { detection ->
                         DetectedObjectResult(
                             boundingBox = detection.boundingBox,
                             confidence = detection.confidence,
@@ -462,6 +548,7 @@ class WalkAssistArFragment : ArFragment() {
                             confidence = detection.confidence,
                             lane = classifyScreenLane(centerXRatio),
                             isStable = detection.trackingState?.isStable == true,
+                            trackId = detection.trackingState?.trackId,
                         )
                     }
                 lastObjectDetections = prioritizedDetections
@@ -512,27 +599,33 @@ class WalkAssistArFragment : ArFragment() {
         hits: List<CorridorHit>,
         rawDepthHits: List<CorridorHit>,
         lane: String,
+        floorMaskState: FloorMaskState?,
     ): LaneDistances {
         val filtered = hits.filter { classifyLane(it.lateralMeters) == lane }
-        val rawDepth = robustLaneRawDepthDistance(rawDepthHits, lane)
+        val obstacleHits = filtered.filter {
+            it.source != HitSource.FLOOR && !isInsideWalkableFloorMask(it, floorMaskState)
+        }
+        val rawDepth = robustLaneRawDepthDistance(rawDepthHits, lane, floorMaskState)
         val floor = filtered.filter { it.source == HitSource.FLOOR }.minOfOrNull { it.distanceMeters }
-        val wall = filtered.filter { it.source == HitSource.WALL }.minOfOrNull { it.distanceMeters }
-        val depth = filtered.filter { it.source == HitSource.DEPTH }.minOfOrNull { it.distanceMeters }
+        val wall = obstacleHits.filter { it.source == HitSource.WALL }.minOfOrNull { it.distanceMeters }
+        val depth = obstacleHits.filter { it.source == HitSource.DEPTH }.minOfOrNull { it.distanceMeters }
         return LaneDistances(
             floor = floor,
             wall = wall,
             depth = depth,
             rawDepth = rawDepth,
-            collision = listOfNotNull(floor, wall, depth, rawDepth).minOrNull(),
+            collision = listOfNotNull(wall, depth, rawDepth).minOrNull(),
         )
     }
 
     private fun robustLaneRawDepthDistance(
         rawDepthHits: List<CorridorHit>,
         lane: String,
+        floorMaskState: FloorMaskState?,
     ): Float? {
         val laneDistances = rawDepthHits
             .filter { classifyLane(it.lateralMeters) == lane }
+            .filterNot { isInsideWalkableFloorMask(it, floorMaskState) }
             .map { it.distanceMeters }
             .sorted()
 
@@ -541,6 +634,34 @@ class WalkAssistArFragment : ArFragment() {
         // Avoid using the single nearest raw-depth point because it is often a flickering outlier.
         val percentileIndex = ((laneDistances.size - 1) * 0.3f).toInt().coerceIn(0, laneDistances.lastIndex)
         return laneDistances[percentileIndex]
+    }
+
+    private fun currentFloorMaskState(frameTimestampNanos: Long): FloorMaskState? {
+        val state = lastFloorMaskState ?: return null
+        val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
+        return if (ageSeconds in 0f..2.0f && state.segmentation.confidence >= 0.25f) state else null
+    }
+
+    private fun currentCrosswalkState(frameTimestampNanos: Long): CrosswalkPatternResult? {
+        val state = lastCrosswalkState ?: return null
+        val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
+        return if (ageSeconds in 0f..2.5f) state.result else null
+    }
+
+    private fun isInsideWalkableFloorMask(
+        hit: CorridorHit,
+        floorMaskState: FloorMaskState?,
+    ): Boolean {
+        val state = floorMaskState ?: return false
+        val imageX = hit.viewXRatio * state.imageWidth.toFloat()
+        val imageY = hit.viewYRatio * state.imageHeight.toFloat()
+        val floorBoundaryY = state.segmentation.boundaryYAt(
+            imageX = imageX,
+            imageWidth = state.imageWidth,
+            imageHeight = state.imageHeight,
+        ) ?: return false
+        val floorMarginPixels = state.imageHeight * 0.025f
+        return imageY >= floorBoundaryY - floorMarginPixels
     }
 
     private fun evaluateVoxelLanes(
@@ -765,9 +886,6 @@ class WalkAssistArFragment : ArFragment() {
     ): List<ObjectOverlayDetection> {
         if (detections.isEmpty()) return emptyList()
 
-        val width = arSceneView.width.toFloat().coerceAtLeast(1f)
-        val height = arSceneView.height.toFloat().coerceAtLeast(1f)
-
         return try {
             frame.acquireRawDepthImage16Bits().use { rawDepthImage ->
                 frame.acquireRawDepthConfidenceImage().use { confidenceImage ->
@@ -849,6 +967,194 @@ class WalkAssistArFragment : ArFragment() {
         )
     }
 
+    private fun updateObjectMotionTags(
+        detections: List<ObjectOverlayDetection>,
+        timestampNanos: Long,
+        worldMapLaneMetrics: WorldMapLaneMetrics,
+    ): List<ObjectOverlayDetection> {
+        if (detections.isEmpty()) {
+            objectMotionMemory.clear()
+            return emptyList()
+        }
+
+        val activeTrackIds = detections.mapNotNull { it.trackId }.toSet()
+        objectMotionMemory.keys.removeAll { it !in activeTrackIds }
+
+        return detections.map { detection ->
+            val trackId = detection.trackId
+            val centerXRatio = (detection.leftRatio + (detection.widthRatio * 0.5f)).coerceIn(0f, 1f)
+            if (trackId == null) {
+                return@map detection
+            }
+
+            val previous = objectMotionMemory[trackId]
+            objectMotionMemory[trackId] = ObjectMotionMemory(
+                centerXRatio = centerXRatio,
+                distanceMeters = detection.distanceMeters?.takeUnless { detection.distanceIsReference },
+                timestampNanos = timestampNanos,
+            )
+
+            val currentDistance = detection.distanceMeters?.takeUnless { detection.distanceIsReference }
+            val dtSeconds = previous?.let { (timestampNanos - it.timestampNanos) / 1_000_000_000f }
+            val centerDelta = previous?.let { centerXRatio - it.centerXRatio } ?: 0f
+            val closingSpeed = if (
+                previous?.distanceMeters != null &&
+                currentDistance != null &&
+                dtSeconds != null &&
+                dtSeconds > 0.08f
+            ) {
+                ((previous.distanceMeters - currentDistance) / dtSeconds).takeIf { it.isFinite() }
+            } else {
+                null
+            }
+            val positiveClosingSpeed = closingSpeed?.coerceAtLeast(0f)
+            val ttcSeconds = if (currentDistance != null && positiveClosingSpeed != null && positiveClosingSpeed > 0.05f) {
+                (currentDistance / positiveClosingSpeed).takeIf { it.isFinite() && it in 0.1f..12f }
+            } else {
+                null
+            }
+            val motionLabel = classifyObjectMotion(
+                centerDelta = centerDelta,
+                closingSpeed = closingSpeed,
+            )
+            val avoidanceLabel = suggestAvoidanceForObject(
+                lane = detection.lane,
+                motionDirectionLabel = motionLabel,
+                worldMapLaneMetrics = worldMapLaneMetrics,
+            )
+
+            detection.copy(
+                objectTimeToCollisionSeconds = ttcSeconds,
+                objectClosingSpeedMetersPerSecond = positiveClosingSpeed,
+                motionDirectionLabel = motionLabel,
+                avoidanceDirectionLabel = avoidanceLabel,
+            )
+        }
+    }
+
+    private fun classifyObjectMotion(
+        centerDelta: Float,
+        closingSpeed: Float?,
+    ): String {
+        val horizontalMotion = when {
+            centerDelta > 0.035f -> "right"
+            centerDelta < -0.035f -> "left"
+            else -> null
+        }
+        return when {
+            (closingSpeed ?: 0f) > 0.18f && horizontalMotion == "right" -> "approaching_right"
+            (closingSpeed ?: 0f) > 0.18f && horizontalMotion == "left" -> "approaching_left"
+            (closingSpeed ?: 0f) > 0.18f -> "approaching"
+            (closingSpeed ?: 0f) < -0.18f -> "receding"
+            horizontalMotion == "right" -> "moving_right"
+            horizontalMotion == "left" -> "moving_left"
+            else -> "stationary"
+        }
+    }
+
+    private fun suggestAvoidanceForObject(
+        lane: String?,
+        motionDirectionLabel: String,
+        worldMapLaneMetrics: WorldMapLaneMetrics,
+    ): String? {
+        val candidate = when (lane) {
+            "left" -> "right"
+            "right" -> "left"
+            "center" -> when (motionDirectionLabel) {
+                "approaching_right", "moving_right" -> "left"
+                "approaching_left", "moving_left" -> "right"
+                "approaching" -> "stop_or_sidestep"
+                else -> null
+            }
+            else -> null
+        }
+        return validateAvoidanceWithLocalMap(candidate, worldMapLaneMetrics)
+    }
+
+    private fun validateAvoidanceWithLocalMap(
+        candidate: String?,
+        worldMapLaneMetrics: WorldMapLaneMetrics,
+    ): String? {
+        if (candidate == null) return null
+        if (candidate == "stop_or_sidestep") {
+            val leftOpen = isLaneOpenForAvoidance("left", worldMapLaneMetrics)
+            val rightOpen = isLaneOpenForAvoidance("right", worldMapLaneMetrics)
+            return when {
+                leftOpen && rightOpen -> chooseMoreOpenSide(worldMapLaneMetrics)
+                leftOpen -> "left"
+                rightOpen -> "right"
+                else -> "stop_or_sidestep"
+            }
+        }
+
+        val isOpen = when (candidate) {
+            "left", "right", "center" -> isLaneOpenForAvoidance(candidate, worldMapLaneMetrics)
+            else -> false
+        }
+        if (isOpen) return candidate
+
+        val centerFallbackOpen = candidate != "center" && isLaneOpenForAvoidance("center", worldMapLaneMetrics)
+        return if (centerFallbackOpen) "center" else "stop_or_sidestep"
+    }
+
+    private fun isLaneOpenForAvoidance(
+        lane: String,
+        worldMapLaneMetrics: WorldMapLaneMetrics,
+    ): Boolean {
+        val freeSpaceMeters = when (lane) {
+            "left" -> worldMapLaneMetrics.leftFreeSpaceMeters
+            "center" -> worldMapLaneMetrics.centerFreeSpaceMeters
+            "right" -> worldMapLaneMetrics.rightFreeSpaceMeters
+            else -> null
+        }
+        val occupancyRatio = when (lane) {
+            "left" -> worldMapLaneMetrics.leftOccupancyRatio
+            "center" -> worldMapLaneMetrics.centerOccupancyRatio
+            "right" -> worldMapLaneMetrics.rightOccupancyRatio
+            else -> 1f
+        }
+        val nearestDistance = when (lane) {
+            "left" -> worldMapLaneMetrics.leftDistance
+            "center" -> worldMapLaneMetrics.centerDistance
+            "right" -> worldMapLaneMetrics.rightDistance
+            else -> 0f
+        }
+        val opennessScore = laneOpennessScore(
+            freeSpaceMeters = freeSpaceMeters,
+            occupancyRatio = occupancyRatio,
+            nearestDistance = nearestDistance,
+        )
+        val hasEnoughFreeSpace = (freeSpaceMeters ?: 0f) >= 2.0f
+        val hasLowOccupancy = occupancyRatio <= 0.18f
+        val nearestObstacleIsNotImmediate = nearestDistance == null || nearestDistance >= 1.2f
+        return opennessScore >= 0.58f && hasEnoughFreeSpace && hasLowOccupancy && nearestObstacleIsNotImmediate
+    }
+
+    private fun chooseMoreOpenSide(worldMapLaneMetrics: WorldMapLaneMetrics): String {
+        val leftScore = laneOpennessScore(
+            freeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
+            occupancyRatio = worldMapLaneMetrics.leftOccupancyRatio,
+            nearestDistance = worldMapLaneMetrics.leftDistance,
+        )
+        val rightScore = laneOpennessScore(
+            freeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
+            occupancyRatio = worldMapLaneMetrics.rightOccupancyRatio,
+            nearestDistance = worldMapLaneMetrics.rightDistance,
+        )
+        return if (leftScore >= rightScore) "left" else "right"
+    }
+
+    private fun laneOpennessScore(
+        freeSpaceMeters: Float?,
+        occupancyRatio: Float,
+        nearestDistance: Float?,
+    ): Float {
+        val freeScore = (freeSpaceMeters ?: 0f).coerceIn(0f, 5f) / 5f
+        val occupancyScore = 1f - occupancyRatio.coerceIn(0f, 1f)
+        val nearestScore = (nearestDistance ?: 5f).coerceIn(0f, 5f) / 5f
+        return (freeScore * 0.5f) + (occupancyScore * 0.3f) + (nearestScore * 0.2f)
+    }
+
     private fun sampleBoxDepthHits(
         frame: Frame,
         rawDepthImage: Image,
@@ -871,11 +1177,11 @@ class WalkAssistArFragment : ArFragment() {
 
         return buildList {
             sampleYs.forEachIndexed { yIndex, yFactor ->
-                sampleXs.forEachIndexed { xIndex, xFactor ->
+                sampleXs.forEachIndexed xLoop@{ xIndex, xFactor ->
                     if (edgeOnly) {
                         val isEdgeX = xIndex == 0 || xIndex == sampleXs.lastIndex
                         val isEdgeY = yIndex == 0 || yIndex == sampleYs.lastIndex
-                        if (!(isEdgeX || isEdgeY)) return@forEachIndexed
+                        if (!(isEdgeX || isEdgeY)) return@xLoop
                     }
                     val sampleX = width * (expandedLeft + (expandedWidth * xFactor))
                     val sampleY = height * (expandedTop + (expandedHeight * yFactor))
@@ -1376,17 +1682,31 @@ class WalkAssistArFragment : ArFragment() {
         return ((oldest - newest) / samples).coerceAtLeast(0f) * 10f
     }
 
-    private fun computeRiskLabel(
+    private fun computeTtcRisk(
         collisionDistance: Float?,
         approachSpeed: Float?,
         motionSpeed: Float?,
-    ): String {
-        if (collisionDistance == null) return "searching"
-        if (collisionDistance < 0.8f) return "critical"
-        if ((approachSpeed ?: 0f) > 0.55f && (motionSpeed ?: 0f) > 0.12f) return "critical"
-        if (collisionDistance < 1.5f || (approachSpeed ?: 0f) > 0.25f) return "high"
-        if ((motionSpeed ?: 0f) > 0.08f && collisionDistance < 2.2f) return "watch"
-        return "stable"
+    ): TtcRiskResult {
+        if (collisionDistance == null) return TtcRiskResult("searching", null)
+
+        val relativeClosingSpeed = maxOf(approachSpeed ?: 0f, motionSpeed ?: 0f)
+        val ttcSeconds = if (relativeClosingSpeed > 0.05f) {
+            (collisionDistance / relativeClosingSpeed).takeIf { it.isFinite() && it in 0.1f..12f }
+        } else {
+            null
+        }
+
+        val label = when {
+            collisionDistance < 0.55f -> "critical"
+            ttcSeconds != null && ttcSeconds <= 1.5f -> "critical"
+            collisionDistance < 0.9f -> "high"
+            ttcSeconds != null && ttcSeconds <= 3.0f -> "high"
+            ttcSeconds != null && ttcSeconds <= 5.0f -> "watch"
+            collisionDistance < 1.6f -> "watch"
+            else -> "stable"
+        }
+
+        return TtcRiskResult(label, ttcSeconds)
     }
 
     private fun computeSuggestedDirection(
