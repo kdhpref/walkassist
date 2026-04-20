@@ -1,4 +1,4 @@
-package com.example.walkassist.feedback
+package com.example.walkassist.feedback.core
 
 enum class FeedbackAlertLevel {
     SAFE,
@@ -17,14 +17,14 @@ enum class FeedbackSensorType {
     ARCORE,
     YOLO,
     OCR,
-    TEST,
+    MAP,
     UNKNOWN,
 }
 
-data class FeedbackObstacleData(
+data class FeedbackObstacleSample(
     val distanceMeters: Float,
-    val confidence: Float = 1.0f,
-    val sensorType: FeedbackSensorType = FeedbackSensorType.UNKNOWN,
+    val confidence: Float,
+    val sensorType: FeedbackSensorType,
     val timestampMillis: Long = System.currentTimeMillis(),
 ) {
     fun isValid(): Boolean = distanceMeters >= 0f && confidence in 0f..1f
@@ -39,8 +39,18 @@ data class FeedbackUiState(
     val sensorStatus: FeedbackSensorStatus = FeedbackSensorStatus.WAITING,
     val distanceMeters: Float? = null,
     val confidence: Float = 0f,
-    val guidanceMessage: String = "공간 인식 대기 중입니다.",
+    val message: String = "공간 인식 대기 중입니다.",
     val shouldAnnounce: Boolean = false,
+)
+
+sealed interface FeedbackInput {
+    data class Obstacle(val sample: FeedbackObstacleSample) : FeedbackInput
+    data class SensorStatus(val status: FeedbackSensorStatus) : FeedbackInput
+}
+
+data class FeedbackDecision(
+    val alertLevel: FeedbackAlertLevel,
+    val message: String,
 )
 
 object FeedbackThresholds {

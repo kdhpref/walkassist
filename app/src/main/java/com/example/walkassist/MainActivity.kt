@@ -1,6 +1,7 @@
 package com.example.walkassist
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.view.Gravity
@@ -42,23 +43,41 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.activity.viewModels
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.commitNow
 import androidx.fragment.app.FragmentContainerView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import com.example.walkassist.feedback.core.FeedbackUiState
+import com.example.walkassist.feedback.core.FeedbackAlertLevel
+import com.example.walkassist.feedback.core.FeedbackSensorStatus
+import com.example.walkassist.feedback.engine.ArFeedbackMapper
+import com.example.walkassist.feedback.engine.FeedbackViewModel
+import com.example.walkassist.feedback.runtime.FeedbackManager
+import com.example.walkassist.feedback.ui.FeedbackOverlayCard
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 class MainActivity : AppCompatActivity() {
     private val fragmentContainerId = 1001
+    private val feedbackViewModel by viewModels<FeedbackViewModel>()
+    private val arFeedbackMapper = ArFeedbackMapper()
+    private lateinit var feedbackManager: FeedbackManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        feedbackManager = FeedbackManager(this)
+        bindArStateToFeedback()
 
         if (!hasCameraPermission()) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 100)
@@ -87,9 +106,12 @@ class MainActivity : AppCompatActivity() {
             )
             setContent {
                 MaterialTheme {
-                    Box(modifier = Modifier.fillMaxSize()) {
-                        MeasurementOverlay(state = ArMeasurementBridge.state.collectAsState().value)
-                    }
+                    val arState = ArMeasurementBridge.state.collectAsState().value
+                    val feedbackState = feedbackViewModel.uiState.collectAsState().value
+                    WalkAssistRootOverlay(
+                        state = arState,
+                        feedbackState = feedbackState,
+                    )
                 }
             }
         }
@@ -105,6 +127,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun bindArStateToFeedback() {
+        feedbackViewModel.startWatchdog()
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    ArMeasurementBridge.state.collect { state ->
+                        feedbackViewModel.onInput(arFeedbackMapper.map(state))
+                    }
+                }
+                launch {
+                    feedbackViewModel.uiState.collect { feedbackState ->
+                        if (feedbackState.shouldAnnounce) {
+                            feedbackManager.provideFeedback(
+                                message = feedbackState.message,
+                                level = feedbackState.alertLevel,
+                            )
+                            feedbackViewModel.consumeAnnouncement()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        if (::feedbackManager.isInitialized) {
+            feedbackManager.release()
+        }
+        super.onDestroy()
+    }
+
     private fun hasCameraPermission(): Boolean {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
@@ -112,7 +165,227 @@ class MainActivity : AppCompatActivity() {
 }
 
 @Composable
-private fun MeasurementOverlay(state: ArMeasurementState) {
+private fun WalkAssistRootOverlay(
+    state: ArMeasurementState,
+    feedbackState: FeedbackUiState,
+) {
+    var cameraUiVisible by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (cameraUiVisible) {
+            MeasurementOverlay(
+                state = state,
+                feedbackState = feedbackState,
+            )
+            CameraUiControls(
+                onGuideClick = { cameraUiVisible = false },
+                onSettingsClick = {
+                    context.startActivity(Intent(context, GuideSettingsActivity::class.java))
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 14.dp, bottom = 150.dp),
+            )
+        } else {
+            GuideStatusOverlay(
+                arState = state,
+                feedbackState = feedbackState,
+                onCameraClick = { cameraUiVisible = true },
+                onSettingsClick = {
+                    context.startActivity(Intent(context, GuideSettingsActivity::class.java))
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun GuideStatusOverlay(
+    arState: ArMeasurementState,
+    feedbackState: FeedbackUiState,
+    onCameraClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+) {
+    val palette = guidePalette(feedbackState.alertLevel, feedbackState.sensorStatus)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(palette.background)
+            .padding(24.dp),
+    ) {
+        Column(
+            modifier = Modifier.align(Alignment.Center),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = palette.icon,
+                color = palette.foreground,
+                fontSize = 52.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(modifier = Modifier.height(18.dp))
+            Text(
+                text = palette.title,
+                color = palette.foreground,
+                fontSize = 72.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(modifier = Modifier.height(18.dp))
+            Text(
+                text = feedbackState.message,
+                color = palette.foreground,
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+            Text(
+                text = guideDistanceText(feedbackState, arState),
+                color = palette.foreground.copy(alpha = 0.86f),
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+
+        Text(
+            text = "WalkAssist",
+            color = palette.foreground.copy(alpha = 0.86f),
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.align(Alignment.TopStart),
+        )
+
+        Column(
+            modifier = Modifier.align(Alignment.BottomEnd),
+            horizontalAlignment = Alignment.End,
+        ) {
+            Text(
+                text = guideSensorStatus(feedbackState.sensorStatus),
+                color = palette.foreground.copy(alpha = 0.82f),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            GuideActionChip(
+                text = "카메라 보기",
+                onClick = onCameraClick,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            GuideActionChip(
+                text = "설정",
+                onClick = onSettingsClick,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CameraUiControls(
+    onGuideClick: () -> Unit,
+    onSettingsClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = Alignment.End,
+    ) {
+        GuideActionChip(
+            text = "큰 화면",
+            onClick = onGuideClick,
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        GuideActionChip(
+            text = "설정",
+            onClick = onSettingsClick,
+        )
+    }
+}
+
+@Composable
+private fun GuideActionChip(
+    text: String,
+    onClick: () -> Unit,
+) {
+    Text(
+        text = text,
+        color = Color.White,
+        fontSize = 16.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier
+            .background(Color(0x99121820), RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+    )
+}
+
+private data class GuidePalette(
+    val background: Color,
+    val foreground: Color,
+    val title: String,
+    val icon: String,
+)
+
+private fun guidePalette(
+    alertLevel: FeedbackAlertLevel,
+    sensorStatus: FeedbackSensorStatus,
+): GuidePalette {
+    if (sensorStatus == FeedbackSensorStatus.WAITING || sensorStatus == FeedbackSensorStatus.DISCONNECTED) {
+        return GuidePalette(
+            background = Color(0xFF4A5568),
+            foreground = Color.White,
+            title = "대기",
+            icon = "..."
+        )
+    }
+    return when (alertLevel) {
+        FeedbackAlertLevel.SAFE -> GuidePalette(
+            background = Color(0xFF15803D),
+            foreground = Color.White,
+            title = "안전",
+            icon = "OK",
+        )
+        FeedbackAlertLevel.CAUTION -> GuidePalette(
+            background = Color(0xFFF59E0B),
+            foreground = Color(0xFF17120A),
+            title = "주의",
+            icon = "!",
+        )
+        FeedbackAlertLevel.DANGER -> GuidePalette(
+            background = Color(0xFFDC2626),
+            foreground = Color.White,
+            title = "위험",
+            icon = "!!",
+        )
+    }
+}
+
+private fun guideDistanceText(
+    feedbackState: FeedbackUiState,
+    arState: ArMeasurementState,
+): String {
+    val distance = feedbackState.distanceMeters ?: arState.collisionDistanceMeters
+    val confidence = (feedbackState.confidence * 100f).toInt().coerceIn(0, 100)
+    return if (distance == null) {
+        "공간 정보를 수집하는 중입니다."
+    } else {
+        "전방 ${formatMetersShort(distance)} / 신뢰도 $confidence%"
+    }
+}
+
+private fun guideSensorStatus(status: FeedbackSensorStatus): String {
+    return when (status) {
+        FeedbackSensorStatus.WAITING -> "센서 대기 중"
+        FeedbackSensorStatus.CONNECTED -> "센서 연결됨"
+        FeedbackSensorStatus.DISCONNECTED -> "센서 끊김"
+        FeedbackSensorStatus.ERROR -> "센서 오류"
+    }
+}
+
+@Composable
+private fun MeasurementOverlay(
+    state: ArMeasurementState,
+    feedbackState: FeedbackUiState,
+) {
     var debugVisible by remember { mutableStateOf(false) }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -126,6 +399,13 @@ private fun MeasurementOverlay(state: ArMeasurementState) {
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 14.dp, bottom = 18.dp),
+        )
+
+        FeedbackOverlayCard(
+            state = feedbackState,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 14.dp, bottom = 18.dp),
         )
 
         Column(

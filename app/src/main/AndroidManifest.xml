@@ -35,9 +35,9 @@
             </intent-filter>
         </activity>
         <activity
-            android:name=".feedback.FeedbackPreviewActivity"
+            android:name=".GuideSettingsActivity"
             android:exported="false"
-            android:label="WalkAssist Feedback"
+            android:label="설정"
             android:theme="@style/Theme.WalkAssist" />
     </application>
 </manifest>
