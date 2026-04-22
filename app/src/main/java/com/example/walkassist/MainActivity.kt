@@ -63,6 +63,7 @@ import com.example.walkassist.feedback.engine.ArFeedbackMapper
 import com.example.walkassist.feedback.engine.FeedbackViewModel
 import com.example.walkassist.feedback.runtime.FeedbackManager
 import com.example.walkassist.feedback.ui.FeedbackOverlayCard
+import com.example.walkassist.map.MapNavigationActivity
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
@@ -73,6 +74,7 @@ class MainActivity : AppCompatActivity() {
     private val feedbackViewModel by viewModels<FeedbackViewModel>()
     private val arFeedbackMapper = ArFeedbackMapper()
     private lateinit var feedbackManager: FeedbackManager
+    private var arFragment: WalkAssistArFragment? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -111,6 +113,7 @@ class MainActivity : AppCompatActivity() {
                     WalkAssistRootOverlay(
                         state = arState,
                         feedbackState = feedbackState,
+                        onOcrClick = ::requestOneShotOcr,
                     )
                 }
             }
@@ -121,10 +124,41 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
 
         if (savedInstanceState == null) {
+            val fragment = WalkAssistArFragment()
+            configureArFragment(fragment)
             supportFragmentManager.commitNow {
-                replace(fragmentContainerId, WalkAssistArFragment())
+                replace(fragmentContainerId, fragment)
             }
+        } else {
+            (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.let(::configureArFragment)
         }
+    }
+
+    private fun configureArFragment(fragment: WalkAssistArFragment) {
+        arFragment = fragment
+        fragment.onOneShotOcrResult = { message ->
+            feedbackManager.provideFeedback(
+                message = message,
+                level = FeedbackAlertLevel.CAUTION,
+            )
+        }
+    }
+
+    private fun requestOneShotOcr() {
+        val fragment = arFragment
+            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.also(::configureArFragment)
+
+        if (fragment == null) {
+            feedbackManager.provideFeedback(
+                message = "문자 인식 준비 중입니다.",
+                level = FeedbackAlertLevel.CAUTION,
+            )
+            return
+        }
+
+        fragment.requestOneShotOcr()
     }
 
     private fun bindArStateToFeedback() {
@@ -168,9 +202,13 @@ class MainActivity : AppCompatActivity() {
 private fun WalkAssistRootOverlay(
     state: ArMeasurementState,
     feedbackState: FeedbackUiState,
+    onOcrClick: () -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val openMapNavigation = {
+        context.startActivity(Intent(context, MapNavigationActivity::class.java))
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (cameraUiVisible) {
@@ -197,6 +235,22 @@ private fun WalkAssistRootOverlay(
                 },
             )
         }
+
+        GuideActionChip(
+            text = "길찾기",
+            onClick = openMapNavigation,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 14.dp, end = 14.dp),
+        )
+
+        GuideActionChip(
+            text = "OCR",
+            onClick = onOcrClick,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 18.dp),
+        )
     }
 }
 
@@ -305,13 +359,14 @@ private fun CameraUiControls(
 private fun GuideActionChip(
     text: String,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Text(
         text = text,
         color = Color.White,
         fontSize = 16.sp,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier
+        modifier = modifier
             .background(Color(0x99121820), RoundedCornerShape(18.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 12.dp),
@@ -485,7 +540,7 @@ private fun MeasurementOverlay(
             onClick = { debugVisible = !debugVisible },
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(top = 14.dp, end = 14.dp),
+                .padding(top = 66.dp, end = 14.dp),
         )
 
         if (debugVisible) {
