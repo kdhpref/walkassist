@@ -22,6 +22,7 @@ import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
 import com.google.ar.sceneform.math.Vector3
 import com.google.ar.sceneform.ux.ArFragment
+import com.example.walkassist.ocr.OneShotOcrReader
 import java.io.ByteArrayOutputStream
 import java.nio.ByteOrder
 import java.util.concurrent.Executors
@@ -138,9 +139,12 @@ class WalkAssistArFragment : ArFragment() {
     private val objectAnalyzer by lazy { ObjectAnalyzer(requireContext().applicationContext) }
     private val floorSegmenter by lazy { ModelFloorSegmenter(requireContext().applicationContext) }
     private val crosswalkPatternDetector by lazy { CrosswalkPatternDetector() }
+    private var oneShotOcrReader: OneShotOcrReader? = null
     private val objectTracker = ObjectTracker()
     private val detectorExecutor = Executors.newSingleThreadExecutor()
     private val detectionInFlight = AtomicBoolean(false)
+    private val oneShotOcrRequested = AtomicBoolean(false)
+    private val oneShotOcrInFlight = AtomicBoolean(false)
     private var lastDetectionStartedAtMs = 0L
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
     @Volatile
@@ -157,6 +161,15 @@ class WalkAssistArFragment : ArFragment() {
     private val collisionHistory = ArrayDeque<Float>()
     private val directionHistory = ArrayDeque<String>()
     private var stableDirection = "searching"
+    var onOneShotOcrResult: ((String) -> Unit)? = null
+
+    fun requestOneShotOcr() {
+        if (oneShotOcrRequested.get() || oneShotOcrInFlight.get()) {
+            dispatchOneShotOcrResult("이미 문자 인식 중입니다.")
+            return
+        }
+        oneShotOcrRequested.set(true)
+    }
 
     override fun getSessionConfiguration(session: Session): Config {
         planeDiscoveryController.hide()
@@ -185,6 +198,7 @@ class WalkAssistArFragment : ArFragment() {
     override fun onDestroy() {
         detectorExecutor.shutdownNow()
         objectAnalyzer.close()
+        oneShotOcrReader?.close()
         super.onDestroy()
     }
 
@@ -465,8 +479,9 @@ class WalkAssistArFragment : ArFragment() {
     private fun scheduleVisionAnalysis(frame: Frame) {
         if (detectionInFlight.get()) return
 
+        val ocrRequested = oneShotOcrRequested.get()
         val now = SystemClock.elapsedRealtime()
-        if (now - lastDetectionStartedAtMs < 450L) return
+        if (!ocrRequested && now - lastDetectionStartedAtMs < 450L) return
 
         val image = try {
             frame.acquireCameraImage()
@@ -483,9 +498,15 @@ class WalkAssistArFragment : ArFragment() {
         lastDetectionStartedAtMs = now
         detectionInFlight.set(true)
         detectorExecutor.execute {
+            var shouldRunOcr = false
+            var ocrStarted = false
             try {
                 val bitmap = image.toUprightBitmap(rotationDegrees)
                 image.close()
+                shouldRunOcr = oneShotOcrRequested.getAndSet(false)
+                if (shouldRunOcr) {
+                    ocrStarted = startOneShotOcr(bitmap)
+                }
                 val floorSegmentation = localFloorSegmenter.segment(bitmap)
                 lastFloorMaskState = FloorMaskState(
                     segmentation = floorSegmentation,
@@ -555,9 +576,42 @@ class WalkAssistArFragment : ArFragment() {
                 bitmap.recycle()
             } catch (_: Exception) {
                 runCatching { image.close() }
+                if (shouldRunOcr && !ocrStarted) {
+                    oneShotOcrInFlight.set(false)
+                    dispatchOneShotOcrResult("문자를 읽을 이미지를 가져오지 못했습니다.")
+                }
             } finally {
                 detectionInFlight.set(false)
             }
+        }
+    }
+
+    private fun startOneShotOcr(bitmap: Bitmap): Boolean {
+        if (!oneShotOcrInFlight.compareAndSet(false, true)) {
+            return false
+        }
+
+        val ocrBitmap = try {
+            bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        } catch (_: Exception) {
+            oneShotOcrInFlight.set(false)
+            dispatchOneShotOcrResult("문자를 읽을 이미지를 가져오지 못했습니다.")
+            return false
+        }
+
+        val reader = oneShotOcrReader ?: OneShotOcrReader().also {
+            oneShotOcrReader = it
+        }
+        reader.read(ocrBitmap) { message ->
+            oneShotOcrInFlight.set(false)
+            dispatchOneShotOcrResult(message)
+        }
+        return true
+    }
+
+    private fun dispatchOneShotOcrResult(message: String) {
+        activity?.runOnUiThread {
+            onOneShotOcrResult?.invoke(message)
         }
     }
 

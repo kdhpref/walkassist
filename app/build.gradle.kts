@@ -1,6 +1,23 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+val localProperties = Properties().apply {
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        localPropertiesFile.inputStream().use { load(it) }
+    }
+}
+
+fun localProperty(name: String): String {
+    return localProperties.getProperty(name, "")
+}
+
+fun quotedBuildConfigValue(value: String): String {
+    return "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 }
 
 android {
@@ -15,6 +32,13 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        manifestPlaceholders["naverMapClientId"] =
+            localProperty("NAVER_MAP_CLIENT_ID").ifBlank { "missing_naver_map_client_id" }
+        buildConfigField(
+            "String",
+            "TMAP_API_KEY",
+            quotedBuildConfigValue(localProperty("TMAP_API_KEY")),
+        )
         vectorDrawables {
             useSupportLibrary = true
         }
@@ -41,6 +65,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
@@ -70,6 +95,12 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.2.0")
     implementation("com.google.ar:core:1.46.0")
     implementation("com.google.ar.sceneform.ux:sceneform-ux:1.17.1")
+    implementation("com.google.mlkit:text-recognition-korean:16.0.1")
+    implementation("com.naver.maps:map-sdk:3.23.1")
+    implementation("com.google.android.gms:play-services-location:21.0.1")
+    implementation("com.squareup.retrofit2:retrofit:2.9.0")
+    implementation("com.squareup.retrofit2:converter-gson:2.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
     testImplementation("junit:junit:4.13.2")
 }
