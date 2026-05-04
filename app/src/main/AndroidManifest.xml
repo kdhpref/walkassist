@@ -46,6 +46,11 @@
             android:label="설정"
             android:theme="@style/Theme.WalkAssist" />
         <activity
+            android:name=".SpatialReplayTestActivity"
+            android:exported="false"
+            android:label="영상 리플레이 테스트"
+            android:theme="@style/Theme.WalkAssist" />
+        <activity
             android:name=".map.MapNavigationActivity"
             android:exported="false"
             android:label="길찾기"

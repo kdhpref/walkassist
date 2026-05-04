@@ -18,6 +18,7 @@ enum class FeedbackSensorType {
     YOLO,
     OCR,
     MAP,
+    VIDEO_REPLAY,
     UNKNOWN,
 }
 
