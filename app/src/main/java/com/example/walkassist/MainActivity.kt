@@ -114,6 +114,10 @@ class MainActivity : AppCompatActivity() {
                         state = arState,
                         feedbackState = feedbackState,
                         onOcrClick = ::requestOneShotOcr,
+                        onReplayTestClick = {
+                            startActivity(Intent(this@MainActivity, SpatialReplayTestActivity::class.java))
+                            finish()
+                        },
                     )
                 }
             }
@@ -203,6 +207,7 @@ private fun WalkAssistRootOverlay(
     state: ArMeasurementState,
     feedbackState: FeedbackUiState,
     onOcrClick: () -> Unit,
+    onReplayTestClick: () -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -233,6 +238,7 @@ private fun WalkAssistRootOverlay(
                 onSettingsClick = {
                     context.startActivity(Intent(context, GuideSettingsActivity::class.java))
                 },
+                onReplayTestClick = onReplayTestClick,
             )
         }
 
@@ -260,6 +266,7 @@ private fun GuideStatusOverlay(
     feedbackState: FeedbackUiState,
     onCameraClick: () -> Unit,
     onSettingsClick: () -> Unit,
+    onReplayTestClick: () -> Unit,
 ) {
     val palette = guidePalette(feedbackState.alertLevel, feedbackState.sensorStatus)
     Box(
@@ -328,6 +335,11 @@ private fun GuideStatusOverlay(
             GuideActionChip(
                 text = "설정",
                 onClick = onSettingsClick,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            GuideActionChip(
+                text = "영상 리플레이 테스트",
+                onClick = onReplayTestClick,
             )
         }
     }
