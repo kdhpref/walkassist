@@ -1,6 +1,5 @@
 package com.example.walkassist
 
-import android.content.Context
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
@@ -15,7 +14,7 @@ import androidx.appcompat.app.AppCompatActivity
 
 class GuideSettingsActivity : AppCompatActivity() {
     private val preferences by lazy {
-        getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        WalkAssistSettings.preferences(this)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -55,6 +54,33 @@ class GuideSettingsActivity : AppCompatActivity() {
             setOnClickListener { showEmergencyContactDialog() }
         }
 
+        val vlmModelButton = Button(this).apply {
+            text = vlmModelButtonText()
+            textSize = 20f
+            minHeight = 72
+            setOnClickListener {
+                showVlmModelDialog {
+                    text = vlmModelButtonText()
+                }
+            }
+        }
+
+        val arcoreTtsButton = Button(this).apply {
+            text = arcoreTtsButtonText()
+            textSize = 20f
+            minHeight = 72
+            setOnClickListener {
+                val nextEnabled = !WalkAssistSettings.isArcoreTtsEnabled(this@GuideSettingsActivity)
+                WalkAssistSettings.setArcoreTtsEnabled(this@GuideSettingsActivity, nextEnabled)
+                text = arcoreTtsButtonText()
+                Toast.makeText(
+                    this@GuideSettingsActivity,
+                    if (nextEnabled) "ARCore TTS enabled" else "ARCore TTS disabled",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+
         val closeButton = Button(this).apply {
             text = "닫기"
             textSize = 18f
@@ -65,8 +91,40 @@ class GuideSettingsActivity : AppCompatActivity() {
         root.addView(titleText, fullWidthParams())
         root.addView(descriptionText, fullWidthParams())
         root.addView(emergencyButton, fullWidthParams())
+        root.addView(vlmModelButton, fullWidthParams(topMargin = 18))
+        root.addView(arcoreTtsButton, fullWidthParams(topMargin = 18))
         root.addView(closeButton, fullWidthParams(topMargin = 18))
         setContentView(root)
+    }
+
+    private fun showVlmModelDialog(onSaved: () -> Unit) {
+        val selections = VlmModelSelection.entries.toTypedArray()
+        val labels = selections.map { it.label }.toTypedArray()
+        val currentSelection = WalkAssistSettings.vlmModelSelection(this)
+        val checkedIndex = selections.indexOf(currentSelection).coerceAtLeast(0)
+
+        AlertDialog.Builder(this)
+            .setTitle("VLM model")
+            .setSingleChoiceItems(labels, checkedIndex) { dialog, which ->
+                WalkAssistSettings.setVlmModelSelection(this, selections[which])
+                Toast.makeText(this, "VLM model: ${selections[which].label}", Toast.LENGTH_SHORT).show()
+                onSaved()
+                dialog.dismiss()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun vlmModelButtonText(): String {
+        return "VLM model: ${WalkAssistSettings.vlmModelSelection(this).label}"
+    }
+
+    private fun arcoreTtsButtonText(): String {
+        return if (WalkAssistSettings.isArcoreTtsEnabled(this)) {
+            "ARCore TTS: ON"
+        } else {
+            "ARCore TTS: OFF"
+        }
     }
 
     private fun showEmergencyContactDialog() {
@@ -148,7 +206,6 @@ class GuideSettingsActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val PREF_NAME = "walkassist_settings"
         private const val KEY_EMERGENCY_NAME = "emergency_name"
         private const val KEY_EMERGENCY_PHONE = "emergency_phone"
     }

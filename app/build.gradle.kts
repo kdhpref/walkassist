@@ -3,6 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 val localProperties = Properties().apply {
@@ -68,9 +69,6 @@ android {
         buildConfig = true
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.10"
-    }
 }
 
 dependencies {
@@ -96,6 +94,7 @@ dependencies {
     implementation("com.google.ar:core:1.46.0")
     implementation("com.google.ar.sceneform.ux:sceneform-ux:1.17.1")
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
+    implementation("com.google.mlkit:genai-prompt:1.0.0-beta2")
     implementation("com.naver.maps:map-sdk:3.23.1")
     implementation("com.google.android.gms:play-services-location:21.0.1")
     implementation("com.squareup.retrofit2:retrofit:2.9.0")

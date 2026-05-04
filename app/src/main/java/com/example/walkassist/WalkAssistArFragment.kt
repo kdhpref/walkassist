@@ -9,6 +9,7 @@ import android.graphics.YuvImage
 import android.media.Image
 import android.os.Bundle
 import android.os.SystemClock
+import android.util.Log
 import android.view.View
 import android.view.Surface
 import com.google.ar.core.Config
@@ -116,6 +117,11 @@ class WalkAssistArFragment : ArFragment() {
         val timestampNanos: Long,
     )
 
+    private data class VlmVisionState(
+        val interpretation: VlmSceneInterpretation,
+        val timestampNanos: Long,
+    )
+
     private enum class HitSource {
         FLOOR,
         WALL,
@@ -139,18 +145,23 @@ class WalkAssistArFragment : ArFragment() {
     private val objectAnalyzer by lazy { ObjectAnalyzer(requireContext().applicationContext) }
     private val floorSegmenter by lazy { ModelFloorSegmenter(requireContext().applicationContext) }
     private val crosswalkPatternDetector by lazy { CrosswalkPatternDetector() }
+    private val vlmSceneInterpreter by lazy { AiCoreGemmaVlmSceneInterpreter(requireContext().applicationContext) }
+    private val vlmInvocationPolicy = VlmInvocationPolicy()
     private var oneShotOcrReader: OneShotOcrReader? = null
     private val objectTracker = ObjectTracker()
     private val detectorExecutor = Executors.newSingleThreadExecutor()
     private val detectionInFlight = AtomicBoolean(false)
     private val oneShotOcrRequested = AtomicBoolean(false)
     private val oneShotOcrInFlight = AtomicBoolean(false)
+    private val oneShotVlmRequested = AtomicBoolean(false)
     private var lastDetectionStartedAtMs = 0L
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
     @Volatile
     private var lastFloorMaskState: FloorMaskState? = null
     @Volatile
     private var lastCrosswalkState: CrosswalkVisionState? = null
+    @Volatile
+    private var lastVlmVisionState: VlmVisionState? = null
     private val objectMotionMemory = mutableMapOf<Int, ObjectMotionMemory>()
     private val worldLocalMap = WorldLocalMap(
         halfRangeMeters = 5f,
@@ -162,6 +173,7 @@ class WalkAssistArFragment : ArFragment() {
     private val directionHistory = ArrayDeque<String>()
     private var stableDirection = "searching"
     var onOneShotOcrResult: ((String) -> Unit)? = null
+    var onOneShotVlmResult: ((String) -> Unit)? = null
 
     fun requestOneShotOcr() {
         if (oneShotOcrRequested.get() || oneShotOcrInFlight.get()) {
@@ -169,6 +181,14 @@ class WalkAssistArFragment : ArFragment() {
             return
         }
         oneShotOcrRequested.set(true)
+    }
+
+    fun requestOneShotVlm() {
+        if (oneShotVlmRequested.get()) {
+            dispatchOneShotVlmResult("이미 앞쪽 장면을 분석 중입니다. 잠시만 기다려 주세요.")
+            return
+        }
+        oneShotVlmRequested.set(true)
     }
 
     override fun getSessionConfiguration(session: Session): Config {
@@ -198,6 +218,7 @@ class WalkAssistArFragment : ArFragment() {
     override fun onDestroy() {
         detectorExecutor.shutdownNow()
         objectAnalyzer.close()
+        vlmSceneInterpreter.close()
         oneShotOcrReader?.close()
         super.onDestroy()
     }
@@ -252,6 +273,7 @@ class WalkAssistArFragment : ArFragment() {
         val corridorHits = sampleWorldCorridor(frame)
         val floorMaskState = currentFloorMaskState(frame.timestamp)
         val crosswalkState = currentCrosswalkState(frame.timestamp)
+        val vlmVisionState = currentVlmVisionState(frame.timestamp)
         val rawDepthHits = sampleRawDepthCorridor(frame)
         val cameraPose = frame.camera.displayOrientedPose
         val mapObservations = (corridorHits + rawDepthHits).map {
@@ -399,9 +421,13 @@ class WalkAssistArFragment : ArFragment() {
             )
         }
 
-        val guidanceLabel = sceneGuidanceLabel
+        val guidanceLabel = guidanceLabelWithVlm(sceneGuidanceLabel, vlmVisionState?.interpretation)
         val statusLabel = baseStatusLabel
-        val note = baseNote
+        val note = if (vlmVisionState != null) {
+            "$baseNote ${vlmVisionState.interpretation.pathSummary}"
+        } else {
+            baseNote
+        }
 
         ArMeasurementBridge.publish(
             ArMeasurementState(
@@ -471,6 +497,12 @@ class WalkAssistArFragment : ArFragment() {
                 voxelOccupiedCount = 0,
                 voxelObstacleColumns = 0,
                 voxelConfidenceScore = 0,
+                vlmModelName = vlmVisionState?.interpretation?.modelName.orEmpty(),
+                vlmRiskLabel = vlmVisionState?.interpretation?.risk?.name?.lowercase().orEmpty(),
+                vlmSuggestedAction = vlmVisionState?.interpretation?.suggestedAction?.name?.lowercase().orEmpty(),
+                vlmConfidenceScore =
+                    ((vlmVisionState?.interpretation?.confidence ?: 0f) * 100f).toInt().coerceIn(0, 100),
+                vlmSummary = vlmVisionState?.interpretation?.pathSummary.orEmpty(),
                 note = note,
             ),
         )
@@ -480,8 +512,9 @@ class WalkAssistArFragment : ArFragment() {
         if (detectionInFlight.get()) return
 
         val ocrRequested = oneShotOcrRequested.get()
+        val vlmRequested = oneShotVlmRequested.get()
         val now = SystemClock.elapsedRealtime()
-        if (!ocrRequested && now - lastDetectionStartedAtMs < 450L) return
+        if (!ocrRequested && !vlmRequested && now - lastDetectionStartedAtMs < 450L) return
 
         val image = try {
             frame.acquireCameraImage()
@@ -494,16 +527,19 @@ class WalkAssistArFragment : ArFragment() {
         val localFloorSegmenter = floorSegmenter
         val localObjectAnalyzer = objectAnalyzer
         val localCrosswalkDetector = crosswalkPatternDetector
+        val localVlmInterpreter = vlmSceneInterpreter
 
         lastDetectionStartedAtMs = now
         detectionInFlight.set(true)
         detectorExecutor.execute {
             var shouldRunOcr = false
             var ocrStarted = false
+            var shouldRunVlm = false
             try {
                 val bitmap = image.toUprightBitmap(rotationDegrees)
                 image.close()
                 shouldRunOcr = oneShotOcrRequested.getAndSet(false)
+                shouldRunVlm = oneShotVlmRequested.getAndSet(false)
                 if (shouldRunOcr) {
                     ocrStarted = startOneShotOcr(bitmap)
                 }
@@ -530,6 +566,13 @@ class WalkAssistArFragment : ArFragment() {
                     ),
                     timestampNanos = frame.timestamp,
                 )
+                val crosswalk = lastCrosswalkState?.result ?: CrosswalkPatternResult(
+                    detected = false,
+                    score = 0f,
+                    stripeCount = 0,
+                    yoloConfidence = 0f,
+                    modeLabel = "unavailable",
+                )
                 val trackedDetections = objectTracker.update(
                     detections = detectedObjects.map { detection ->
                         DetectedObjectResult(
@@ -549,6 +592,50 @@ class WalkAssistArFragment : ArFragment() {
                     },
                     timestampNanos = frame.timestamp,
                 )
+                val primaryAnalysis = FrameAnalysis(
+                    detections = trackedDetections,
+                    nearestObstacle = null,
+                    floorSegmentation = floorSegmentation,
+                    pathMetrics = null,
+                )
+                val spatialFrame = SpatialFrame(
+                    bitmap = bitmap,
+                    timestampMillis = frame.timestamp / 1_000_000L,
+                    source = SpatialFrameSource.LIVE_CAMERA,
+                    pitchRadians = 0f,
+                )
+                if (shouldRunVlm || vlmInvocationPolicy.shouldInvoke(spatialFrame, primaryAnalysis)) {
+                    val vlmStartedAtMs = SystemClock.elapsedRealtime()
+                    Log.d(TAG, "VLM invoke manual=$shouldRunVlm timestampMs=${spatialFrame.timestampMillis}")
+                    val interpretation = localVlmInterpreter.interpret(
+                        frame = spatialFrame,
+                        primaryAnalysis = primaryAnalysis,
+                        crosswalk = crosswalk,
+                    )
+                    Log.d(
+                        TAG,
+                        "VLM result manual=$shouldRunVlm elapsedMs=${SystemClock.elapsedRealtime() - vlmStartedAtMs} risk=${interpretation?.risk}",
+                    )
+                    if (interpretation != null) {
+                        lastVlmVisionState = VlmVisionState(
+                            interpretation = interpretation,
+                            timestampNanos = frame.timestamp,
+                        )
+                        if (shouldRunVlm) {
+                            dispatchOneShotVlmResult(
+                                VlmWalkingAnnouncementFormatter.build(
+                                    interpretation = interpretation,
+                                    primaryAnalysis = primaryAnalysis,
+                                    crosswalk = crosswalk,
+                                ),
+                            )
+                        }
+                    } else if (shouldRunVlm) {
+                        dispatchOneShotVlmResult("장면 분석 결과를 받지 못했습니다. 잠시 멈추고 주변을 직접 확인하세요.")
+                    }
+                } else if (shouldRunVlm) {
+                    dispatchOneShotVlmResult("장면 분석 결과를 받지 못했습니다. 잠시 멈추고 주변을 직접 확인하세요.")
+                }
                 val prioritizedDetections = trackedDetections
                     .sortedWith(
                         compareByDescending<DetectedObjectResult> { it.trackingState?.isStable == true }
@@ -576,6 +663,10 @@ class WalkAssistArFragment : ArFragment() {
                 bitmap.recycle()
             } catch (_: Exception) {
                 runCatching { image.close() }
+                if (shouldRunVlm) {
+                    oneShotVlmRequested.set(false)
+                    dispatchOneShotVlmResult("장면 분석에 실패했습니다. 잠시 멈추고 주변을 직접 확인하세요.")
+                }
                 if (shouldRunOcr && !ocrStarted) {
                     oneShotOcrInFlight.set(false)
                     dispatchOneShotOcrResult("문자를 읽을 이미지를 가져오지 못했습니다.")
@@ -612,6 +703,12 @@ class WalkAssistArFragment : ArFragment() {
     private fun dispatchOneShotOcrResult(message: String) {
         activity?.runOnUiThread {
             onOneShotOcrResult?.invoke(message)
+        }
+    }
+
+    private fun dispatchOneShotVlmResult(message: String) {
+        activity?.runOnUiThread {
+            onOneShotVlmResult?.invoke(message)
         }
     }
 
@@ -700,6 +797,12 @@ class WalkAssistArFragment : ArFragment() {
         val state = lastCrosswalkState ?: return null
         val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
         return if (ageSeconds in 0f..2.5f) state.result else null
+    }
+
+    private fun currentVlmVisionState(frameTimestampNanos: Long): VlmVisionState? {
+        val state = lastVlmVisionState ?: return null
+        val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
+        return if (ageSeconds in 0f..4.0f) state else null
     }
 
     private fun isInsideWalkableFloorMask(
@@ -1868,6 +1971,95 @@ class WalkAssistArFragment : ArFragment() {
         return "전방에 사람이 감지되었습니다."
     }
 
+    private fun guidanceLabelWithVlm(
+        primaryGuidanceLabel: String,
+        vlmInterpretation: VlmSceneInterpretation?,
+    ): String {
+        if (vlmInterpretation == null) return primaryGuidanceLabel
+        return when (vlmInterpretation.risk) {
+            VlmWalkingRisk.BLOCKED -> "앞쪽 장면 분석상 이동이 어려워 보입니다. $primaryGuidanceLabel"
+            VlmWalkingRisk.CAUTION -> "앞쪽 장면 분석상 주의가 필요합니다. $primaryGuidanceLabel"
+            else -> primaryGuidanceLabel
+        }
+    }
+
+    private fun buildOneShotVlmWalkingAnnouncement(
+        interpretation: VlmSceneInterpretation,
+        primaryAnalysis: FrameAnalysis,
+        crosswalk: CrosswalkPatternResult,
+    ): String {
+        val action = when (interpretation.suggestedAction) {
+            VlmSuggestedAction.PROCEED -> "천천히 직진해도 됩니다."
+            VlmSuggestedAction.SLOW_DOWN -> "속도를 줄이고 조심해서 이동하세요."
+            VlmSuggestedAction.VEER_LEFT -> "왼쪽으로 살짝 피해서 이동하세요."
+            VlmSuggestedAction.VEER_RIGHT -> "오른쪽으로 살짝 피해서 이동하세요."
+            VlmSuggestedAction.STOP -> "앞이 위험합니다. 잠시 멈추세요."
+            VlmSuggestedAction.UNKNOWN -> when (interpretation.risk) {
+                VlmWalkingRisk.BLOCKED -> "앞이 막혀 있을 수 있습니다. 잠시 멈추세요."
+                VlmWalkingRisk.CAUTION -> "주의가 필요합니다. 천천히 확인하며 이동하세요."
+                VlmWalkingRisk.CLEAR -> "현재 보이는 길은 대체로 이동 가능합니다."
+                VlmWalkingRisk.UNKNOWN -> "장면 판단이 불확실합니다. 주변을 직접 확인하세요."
+            }
+        }
+        val riskPrefix = when (interpretation.risk) {
+            VlmWalkingRisk.BLOCKED -> "이동이 어려워 보입니다."
+            VlmWalkingRisk.CAUTION -> "주의가 필요합니다."
+            VlmWalkingRisk.CLEAR -> "앞쪽 경로가 비교적 열려 있습니다."
+            VlmWalkingRisk.UNKNOWN -> "앞쪽 장면을 확실히 판단하기 어렵습니다."
+        }
+        val summary = interpretation.pathSummary
+            .replace("VLM stub:", "")
+            .trim()
+            .takeIf { it.isNotBlank() }
+        val evidence = interpretation.evidence
+            .filterNot { it.startsWith("aicore=", ignoreCase = true) }
+            .map { it.replace('_', ' ').trim() }
+            .filter { it.isNotBlank() }
+            .take(3)
+        val detectedObjects = primaryAnalysis.detections
+            .map { presentableVlmObjectLabel(it.label) }
+            .distinct()
+            .take(3)
+        return buildString {
+            append(riskPrefix)
+            append(' ')
+            append(action)
+            summary?.let {
+                append(" 이유는 ")
+                append(it)
+                append('.')
+            }
+            val cues = when {
+                evidence.isNotEmpty() -> evidence
+                detectedObjects.isNotEmpty() -> detectedObjects.map { "$it 감지" }
+                crosswalk.detected -> listOf("횡단보도 패턴 감지")
+                else -> emptyList()
+            }
+            if (cues.isNotEmpty()) {
+                append(" 확인된 단서는 ")
+                append(cues.joinToString(", "))
+                append("입니다.")
+            }
+        }
+    }
+
+    private fun presentableVlmObjectLabel(label: String): String {
+        return when (label.lowercase()) {
+            "person" -> "사람"
+            "bicycle" -> "자전거"
+            "car" -> "자동차"
+            "motorcycle" -> "오토바이"
+            "bus" -> "버스"
+            "truck" -> "트럭"
+            "chair" -> "의자"
+            "bench" -> "벤치"
+            "traffic light" -> "신호등"
+            "stop sign" -> "표지판"
+            "crosswalk" -> "횡단보도"
+            else -> label
+        }
+    }
+
     private fun buildVoxelOverlayPoints(
         voxelPoints: List<VoxelPointUi>,
     ): List<VoxelOverlayPointUi> {
@@ -1914,5 +2106,9 @@ class WalkAssistArFragment : ArFragment() {
         val dy = ay - by
         val dz = az - bz
         return sqrt(dx * dx + dy * dy + dz * dz)
+    }
+
+    companion object {
+        private const val TAG = "WalkAssistVlm"
     }
 }

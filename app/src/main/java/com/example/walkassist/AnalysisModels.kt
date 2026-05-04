@@ -1,5 +1,6 @@
 package com.example.walkassist
 
+import android.graphics.Bitmap
 import android.graphics.RectF
 
 enum class DistanceSource {
@@ -90,4 +91,22 @@ data class FrameAnalysis(
     val floorSegmentation: FloorSegmentationResult? = null,
     val pathMetrics: PathMetrics? = null,
     val debugInfo: AnalyzerDebugInfo? = null,
+)
+
+enum class SpatialFrameSource {
+    LIVE_CAMERA,
+    VIDEO_REPLAY,
+}
+
+data class SpatialFrame(
+    val bitmap: Bitmap,
+    val timestampMillis: Long,
+    val source: SpatialFrameSource,
+    val pitchRadians: Float,
+)
+
+data class SpatialAnalysisResult(
+    val frame: FrameAnalysis,
+    val crosswalk: CrosswalkPatternResult,
+    val vlmInterpretation: VlmSceneInterpretation? = null,
 )

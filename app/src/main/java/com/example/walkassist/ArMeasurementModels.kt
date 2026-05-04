@@ -124,5 +124,10 @@ data class ArMeasurementState(
     val voxelOccupiedCount: Int = 0,
     val voxelObstacleColumns: Int = 0,
     val voxelConfidenceScore: Int = 0,
+    val vlmModelName: String = "",
+    val vlmRiskLabel: String = "",
+    val vlmSuggestedAction: String = "",
+    val vlmConfidenceScore: Int = 0,
+    val vlmSummary: String = "",
     val note: String = "",
 )

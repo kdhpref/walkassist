@@ -388,6 +388,13 @@ private fun ReplayInfoPanel(
                 color = Color(0xFFFFDB7A),
                 fontSize = 12.sp,
             )
+            it.vlmInterpretation?.let { vlm ->
+                Text(
+                    text = "vlm=${vlm.modelName} risk=${vlm.risk.name.lowercase()} conf=${(vlm.confidence * 100f).toInt()}%",
+                    color = Color(0xFF9BD7FF),
+                    fontSize = 12.sp,
+                )
+            }
         }
     }
 }

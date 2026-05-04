@@ -9,8 +9,13 @@ import com.example.walkassist.feedback.core.FeedbackSensorType
 class ArFeedbackMapper {
     fun map(state: ArMeasurementState): FeedbackInput {
         val distance = state.collisionDistanceMeters
+        val sensorType = when (state.trackingLabel) {
+            "tracking" -> FeedbackSensorType.ARCORE
+            "video_replay" -> FeedbackSensorType.VIDEO_REPLAY
+            else -> null
+        }
         return when {
-            state.trackingLabel != "tracking" -> {
+            sensorType == null -> {
                 FeedbackInput.SensorStatus(FeedbackSensorStatus.WAITING)
             }
             distance == null -> {
@@ -21,7 +26,7 @@ class ArFeedbackMapper {
                     FeedbackObstacleSample(
                         distanceMeters = distance,
                         confidence = (state.sensingConfidenceScore / 100f).coerceIn(0f, 1f),
-                        sensorType = FeedbackSensorType.ARCORE,
+                        sensorType = sensorType,
                     ),
                 )
             }

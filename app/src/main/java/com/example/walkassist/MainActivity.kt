@@ -114,6 +114,7 @@ class MainActivity : AppCompatActivity() {
                         state = arState,
                         feedbackState = feedbackState,
                         onOcrClick = ::requestOneShotOcr,
+                        onVlmClick = ::requestOneShotVlm,
                         onReplayTestClick = {
                             startActivity(Intent(this@MainActivity, SpatialReplayTestActivity::class.java))
                             finish()
@@ -147,6 +148,12 @@ class MainActivity : AppCompatActivity() {
                 level = FeedbackAlertLevel.CAUTION,
             )
         }
+        fragment.onOneShotVlmResult = { message ->
+            feedbackManager.provideFeedback(
+                message = message,
+                level = FeedbackAlertLevel.CAUTION,
+            )
+        }
     }
 
     private fun requestOneShotOcr() {
@@ -165,6 +172,22 @@ class MainActivity : AppCompatActivity() {
         fragment.requestOneShotOcr()
     }
 
+    private fun requestOneShotVlm() {
+        val fragment = arFragment
+            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.also(::configureArFragment)
+
+        if (fragment == null) {
+            feedbackManager.provideFeedback(
+                message = "장면 분석을 준비 중입니다. 잠시 후 다시 눌러 주세요.",
+                level = FeedbackAlertLevel.CAUTION,
+            )
+            return
+        }
+
+        fragment.requestOneShotVlm()
+    }
+
     private fun bindArStateToFeedback() {
         feedbackViewModel.startWatchdog()
         lifecycleScope.launch {
@@ -177,10 +200,12 @@ class MainActivity : AppCompatActivity() {
                 launch {
                     feedbackViewModel.uiState.collect { feedbackState ->
                         if (feedbackState.shouldAnnounce) {
-                            feedbackManager.provideFeedback(
-                                message = feedbackState.message,
-                                level = feedbackState.alertLevel,
-                            )
+                            if (WalkAssistSettings.isArcoreTtsEnabled(this@MainActivity)) {
+                                feedbackManager.provideFeedback(
+                                    message = feedbackState.message,
+                                    level = feedbackState.alertLevel,
+                                )
+                            }
                             feedbackViewModel.consumeAnnouncement()
                         }
                     }
@@ -207,6 +232,7 @@ private fun WalkAssistRootOverlay(
     state: ArMeasurementState,
     feedbackState: FeedbackUiState,
     onOcrClick: () -> Unit,
+    onVlmClick: () -> Unit,
     onReplayTestClick: () -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
@@ -256,6 +282,13 @@ private fun WalkAssistRootOverlay(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 18.dp),
+        )
+        GuideActionChip(
+            text = "VLM",
+            onClick = onVlmClick,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 14.dp, bottom = 18.dp),
         )
     }
 }

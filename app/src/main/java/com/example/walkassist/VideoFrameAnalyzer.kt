@@ -17,6 +17,7 @@ data class VideoFrameAnalysisResult(
     val pathMetrics: PathMetrics?,
     val crosswalk: CrosswalkPatternResult,
     val debugInfo: AnalyzerDebugInfo,
+    val vlmInterpretation: VlmSceneInterpretation?,
     val feedbackInput: FeedbackInput,
     val measurementState: ArMeasurementState,
 ) {
@@ -32,11 +33,17 @@ data class VideoFrameAnalysisResult(
                 if (crosswalk.detected) {
                     append(" crosswalk=${(crosswalk.score * 100f).toInt()}%")
                 }
+                if (vlmInterpretation != null) {
+                    append(" vlm=${vlmInterpretation.risk.name.lowercase()}")
+                }
             }
         }
 }
 
-class VideoFrameAnalyzer(context: Context) {
+class VideoFrameAnalyzer(
+    context: Context,
+    private val vlmSceneInterpreter: VlmSceneInterpreter = AiCoreGemmaVlmSceneInterpreter(context),
+) {
     private val appContext = context.applicationContext
     private val floorSegmenter = ModelFloorSegmenter(appContext)
     private val objectAnalyzer = ObjectAnalyzer(appContext)
@@ -94,6 +101,32 @@ class VideoFrameAnalyzer(context: Context) {
             floorSegmentation = floorSegmentation,
             yoloConfidence = yoloCrosswalkConfidence,
         )
+        val primaryAnalysis = FrameAnalysis(
+            detections = trackedObjects,
+            nearestObstacle = trackedObjects
+                .mapNotNull { detection ->
+                    detection.distanceEstimate.distanceMeters?.let { distance -> detection to distance }
+                }
+                .minByOrNull { it.second }
+                ?.first,
+            floorSegmentation = floorSegmentation,
+            pathMetrics = pathMetrics,
+        )
+        val spatialFrame = SpatialFrame(
+            bitmap = bitmap,
+            timestampMillis = frameTimeMs,
+            source = SpatialFrameSource.VIDEO_REPLAY,
+            pitchRadians = pitchRadians,
+        )
+        val vlmInterpretation = if (vlmInvocationPolicy.shouldInvoke(spatialFrame, primaryAnalysis)) {
+            vlmSceneInterpreter.interpret(
+                frame = spatialFrame,
+                primaryAnalysis = primaryAnalysis,
+                crosswalk = crosswalk,
+            )
+        } else {
+            null
+        }
         val overlayDetections = trackedObjects
             .sortedWith(
                 compareByDescending<DetectedObjectResult> { it.trackingState?.isStable == true }
@@ -155,11 +188,12 @@ class VideoFrameAnalyzer(context: Context) {
             pathClearMeters = pathMetrics.pathClearMeters,
         )
         val statusLevel = statusLevelFor(riskLabel)
-        val guidanceLabel = guidanceLabelFor(
+        val primaryGuidanceLabel = guidanceLabelFor(
             collisionDistance = collisionDistance,
             riskLabel = riskLabel,
             suggestedDirection = suggestedDirection,
         )
+        val guidanceLabel = guidanceLabelWithVlm(primaryGuidanceLabel, vlmInterpretation)
         val feedbackInput = if (collisionDistance != null) {
             FeedbackInput.Obstacle(
                 FeedbackObstacleSample(
@@ -191,6 +225,7 @@ class VideoFrameAnalyzer(context: Context) {
                 trackedDetectionCount = overlayDetections.size,
                 lastError = objectAnalyzer.lastErrorMessage,
             ),
+            vlmInterpretation = vlmInterpretation,
             feedbackInput = feedbackInput,
             measurementState = ArMeasurementState(
                 trackingLabel = "video_replay",
@@ -217,6 +252,11 @@ class VideoFrameAnalyzer(context: Context) {
                 crosswalkYoloConfidence = crosswalk.yoloConfidence,
                 crosswalkModeLabel = crosswalk.modeLabel,
                 objectDetections = overlayDetections,
+                vlmModelName = vlmInterpretation?.modelName.orEmpty(),
+                vlmRiskLabel = vlmInterpretation?.risk?.name?.lowercase().orEmpty(),
+                vlmSuggestedAction = vlmInterpretation?.suggestedAction?.name?.lowercase().orEmpty(),
+                vlmConfidenceScore = ((vlmInterpretation?.confidence ?: 0f) * 100f).toInt().coerceIn(0, 100),
+                vlmSummary = vlmInterpretation?.pathSummary.orEmpty(),
                 note = "Replay frames are replacing live camera input. ARCore pose/depth/planes are not available.",
             ),
         )
@@ -224,6 +264,7 @@ class VideoFrameAnalyzer(context: Context) {
 
     fun close() {
         objectAnalyzer.close()
+        vlmSceneInterpreter.close()
     }
 
     private fun classifyScreenLane(centerXRatio: Float): String {
@@ -290,8 +331,22 @@ class VideoFrameAnalyzer(context: Context) {
         }
     }
 
+    private fun guidanceLabelWithVlm(
+        primaryGuidanceLabel: String,
+        vlmInterpretation: VlmSceneInterpretation?,
+    ): String {
+        if (vlmInterpretation == null) return primaryGuidanceLabel
+        return when (vlmInterpretation.risk) {
+            VlmWalkingRisk.BLOCKED -> "VLM stub check: slow down. $primaryGuidanceLabel"
+            VlmWalkingRisk.CAUTION -> "VLM stub check: use caution. $primaryGuidanceLabel"
+            else -> primaryGuidanceLabel
+        }
+    }
+
     companion object {
         const val DEFAULT_FRAME_INTERVAL_MS = 300L
         val DEFAULT_REPLAY_PITCH_RADIANS: Float = (25.0 * PI / 180.0).toFloat()
     }
+
+    private val vlmInvocationPolicy = VlmInvocationPolicy()
 }
