@@ -1,33 +1,29 @@
 # WalkAssist
 
-Android obstacle-distance prototype for pedestrian assistance.
+Android AR walking-assistance prototype for local spatial awareness.
 
 ## Current pipeline
 
-- `CameraX` preview and frame analysis
-- `YOLOv8n` object detection from `app/src/main/assets/yolov8n.tflite`
+- `ARCore` live camera, tracking, planes, hit tests, and raw depth
+- local 2D occupancy map from ARCore world/depth observations
+- `YOLO26n-seg` object detection and segmentation metadata from `app/src/main/assets/yolo26n-seg.tflite`
 - `DeepLabV3-MobileNetV3 Cityscapes` floor segmentation from `app/src/main/assets/deeplabv3_cityscapes.tflite`
 - heuristic floor segmentation fallback when the model is unavailable or throttled
-- distance estimation from:
-  - phone pitch
-  - camera height assumption
-  - detected object ground-contact point
+- object distance enrichment from ARCore raw depth sampled inside object regions
+- low-frequency Gemma VLM scene interpretation through ML Kit GenAI Prompt API
 - Compose overlay that shows:
   - detected object boxes
-  - estimated distance
+  - ARCore depth distance
   - nearest obstacle card
+  - local map
   - debug panel
 
 ## Current limitations
 
-- Distance is still a geometry estimate, not a true depth measurement
+- YOLO segmentation masks are decoded as compact segment metadata; full mask-to-depth fusion is the next step
 - The Cityscapes floor model is throttled and cached because it is expensive on-device
-- Accuracy depends on:
-  - seeing the floor clearly
-  - object touching the floor
-  - stable phone pitch
-  - correct camera height/FOV assumptions
-- `midas_v21_small.tflite` is still in the repo but not used in the current live pipeline
+- Explicit Android IMU collection is not wired yet; phone pitch and motion currently come from ARCore camera pose
+- VLM receives image plus compact CV context, but full ARCore depth/local-map context is still being structured
 
 ## Run
 
@@ -45,12 +41,8 @@ cmd /c gradlew.bat assembleDebug
 cmd /c gradlew.bat installDebug
 ```
 
-## Branches
-
-- Active implementation branch: `codex/floor-segmentation`
-
 ## Next recommended work
 
-- replace the current heavy Cityscapes model with a smaller outdoor walkable-surface model
-- tune camera-height and FOV assumptions per device
-- add object-specific distance confidence and temporal filtering improvements
+- add an explicit IMU/orientation provider for compass heading, pitch/roll/yaw, and motion stability
+- fuse YOLO26n-seg masks with ARCore raw depth per object segment
+- build a typed VLM spatial context object containing phone pose, local map, segment summaries, and depth evidence

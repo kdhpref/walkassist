@@ -9,6 +9,9 @@ data class RawDetection(
     val imageHeight: Int,
     val imageWidth: Int,
     val label: String,
+    val segmentCoverageRatio: Float? = null,
+    val segmentCenterXRatio: Float? = null,
+    val segmentCenterYRatio: Float? = null,
 )
 
 class DistanceEstimator(

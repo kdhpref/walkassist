@@ -44,6 +44,9 @@ data class DetectedObjectResult(
     val imageWidth: Int,
     val label: String,
     val distanceEstimate: DetectionDistanceEstimate,
+    val segmentCoverageRatio: Float? = null,
+    val segmentCenterXRatio: Float? = null,
+    val segmentCenterYRatio: Float? = null,
     val trackingState: TrackingState? = null,
 )
 
@@ -103,10 +106,4 @@ data class SpatialFrame(
     val timestampMillis: Long,
     val source: SpatialFrameSource,
     val pitchRadians: Float,
-)
-
-data class SpatialAnalysisResult(
-    val frame: FrameAnalysis,
-    val crosswalk: CrosswalkPatternResult,
-    val vlmInterpretation: VlmSceneInterpretation? = null,
 )

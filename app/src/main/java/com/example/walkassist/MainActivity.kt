@@ -41,7 +41,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
@@ -65,7 +64,6 @@ import com.example.walkassist.feedback.runtime.FeedbackManager
 import com.example.walkassist.feedback.ui.FeedbackOverlayCard
 import com.example.walkassist.map.MapNavigationActivity
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -620,158 +618,6 @@ private fun OverlayToggleChip(
     )
 }
 
-private data class VoxelOverlayCluster(
-    val hullPoints: List<Offset>,
-    val averageOccupancy: Float,
-    val averageConfidence: Float,
-    val pointCount: Int,
-)
-
-private fun cross(o: Offset, a: Offset, b: Offset): Float {
-    return ((a.x - o.x) * (b.y - o.y)) - ((a.y - o.y) * (b.x - o.x))
-}
-
-private fun convexHull(points: List<Offset>): List<Offset> {
-    if (points.size <= 3) return points.distinct()
-
-    val sorted = points
-        .distinctBy { "${it.x},${it.y}" }
-        .sortedWith(compareBy<Offset> { it.x }.thenBy { it.y })
-
-    if (sorted.size <= 3) return sorted
-
-    val lower = mutableListOf<Offset>()
-    sorted.forEach { point ->
-        while (lower.size >= 2 && cross(lower[lower.size - 2], lower.last(), point) <= 0f) {
-            lower.removeAt(lower.lastIndex)
-        }
-        lower += point
-    }
-
-    val upper = mutableListOf<Offset>()
-    for (index in sorted.indices.reversed()) {
-        val point = sorted[index]
-        while (upper.size >= 2 && cross(upper[upper.size - 2], upper.last(), point) <= 0f) {
-            upper.removeAt(upper.lastIndex)
-        }
-        upper += point
-    }
-
-    lower.removeAt(lower.lastIndex)
-    upper.removeAt(upper.lastIndex)
-    return lower + upper
-}
-
-private fun clusterVoxelOverlayPoints(
-    points: List<VoxelOverlayPointUi>,
-): List<VoxelOverlayCluster> {
-    if (points.isEmpty()) return emptyList()
-
-    val remaining = points.toMutableList()
-    val clusters = mutableListOf<VoxelOverlayCluster>()
-    val xThreshold = 0.07f
-    val yThreshold = 0.09f
-
-    while (remaining.isNotEmpty()) {
-        val seed = remaining.removeAt(0)
-        val clusterPoints = mutableListOf(seed)
-        var index = 0
-        while (index < clusterPoints.size) {
-            val current = clusterPoints[index]
-            val iterator = remaining.iterator()
-            while (iterator.hasNext()) {
-                val candidate = iterator.next()
-                if (
-                    abs(candidate.xRatio - current.xRatio) <= xThreshold &&
-                    abs(candidate.yRatio - current.yRatio) <= yThreshold
-                ) {
-                    clusterPoints += candidate
-                    iterator.remove()
-                }
-            }
-            index += 1
-        }
-
-        if (clusterPoints.size < 6) continue
-
-        var occupancySum = 0f
-        var confidenceSum = 0f
-
-        clusterPoints.forEach { point ->
-            occupancySum += point.occupancyScore
-            confidenceSum += point.confidenceScore
-        }
-
-        val centerX = clusterPoints.map { it.xRatio }.average().toFloat()
-        val centerY = clusterPoints.map { it.yRatio }.average().toFloat()
-        val expandedPoints = clusterPoints.map { point ->
-            val dx = point.xRatio - centerX
-            val dy = point.yRatio - centerY
-            Offset(
-                x = (point.xRatio + (dx * 0.18f)).coerceIn(0f, 1f),
-                y = (point.yRatio + (dy * 0.18f)).coerceIn(0f, 1f),
-            )
-        }
-        val hull = convexHull(expandedPoints)
-        if (hull.size < 3) continue
-
-        clusters += VoxelOverlayCluster(
-            hullPoints = hull,
-            averageOccupancy = occupancySum / clusterPoints.size,
-            averageConfidence = confidenceSum / clusterPoints.size,
-            pointCount = clusterPoints.size,
-        )
-    }
-
-    return clusters.sortedByDescending { it.pointCount }
-}
-
-@Composable
-private fun VoxelClusterOverlay(
-    points: List<VoxelOverlayPointUi>,
-    modifier: Modifier = Modifier,
-) {
-    val clusters = remember(points) { clusterVoxelOverlayPoints(points).take(12) }
-
-    Canvas(modifier = modifier) {
-        clusters.forEach { cluster ->
-            val fillColor = when {
-                cluster.averageOccupancy >= 0.55f -> Color(0x4DFF8E8E)
-                cluster.averageOccupancy >= 0.28f -> Color(0x4DFFC870)
-                else -> Color(0x407A8794)
-            }.copy(alpha = 0.18f + (cluster.averageConfidence * 0.28f))
-            val borderColor = when {
-                cluster.averageOccupancy >= 0.55f -> Color(0xCCFF8E8E)
-                cluster.averageOccupancy >= 0.28f -> Color(0xCCFFC870)
-                else -> Color(0xAA9AA7B4)
-            }.copy(alpha = 0.45f + (cluster.averageConfidence * 0.35f))
-
-            val path = Path().apply {
-                cluster.hullPoints.forEachIndexed { index, point ->
-                    val x = point.x * size.width
-                    val y = point.y * size.height
-                    if (index == 0) {
-                        moveTo(x, y)
-                    } else {
-                        lineTo(x, y)
-                    }
-                }
-                close()
-            }
-
-            drawPath(
-                path = path,
-                color = fillColor,
-            )
-            drawPath(
-                path = path,
-                color = borderColor,
-                style = Stroke(width = 3f),
-            )
-        }
-    }
-}
-
 @Composable
 private fun ObjectDetectionOverlay(
     detections: List<ObjectOverlayDetection>,
@@ -1083,103 +929,6 @@ private fun WorldMapMiniMap(
                 start = Offset(centerX, centerY),
                 end = Offset(centerX, centerY - 22f),
                 strokeWidth = 4f,
-            )
-        }
-    }
-}
-
-@Composable
-private fun VoxelMiniMap(state: ArMeasurementState) {
-    Box(
-        modifier = Modifier
-            .width(150.dp)
-            .height(150.dp)
-            .background(Color(0x22212A34), RoundedCornerShape(8.dp)),
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val halfRange = state.voxelRangeMeters.coerceAtLeast(0.1f)
-            drawRect(Color(0x163A4654))
-
-            state.voxelColumns.forEach { column ->
-                val xRatio = ((column.relativeX + halfRange) / (halfRange * 2f)).coerceIn(0f, 1f)
-                val zRatio = (1f - ((column.relativeZ + halfRange) / (halfRange * 2f))).coerceIn(0f, 1f)
-                val voxelSizePx = (size.minDimension * (state.voxelSizeMeters / (halfRange * 2f)))
-                    .coerceAtLeast(3f)
-                val heightInfluence = ((column.heightMeters + 0.4f) / 1.8f).coerceIn(0f, 1f)
-                val color = when {
-                    column.occupancyScore >= 0.55f -> Color(0xFFFF8E8E)
-                    column.occupancyScore >= 0.28f -> Color(0xFFFFC870)
-                    else -> Color(0xFF8C97A3)
-                }.copy(alpha = 0.28f + (column.confidenceScore * 0.42f) + (heightInfluence * 0.2f))
-                drawRect(
-                    color = color,
-                    topLeft = Offset(
-                        (size.width * xRatio) - (voxelSizePx * 0.5f),
-                        (size.height * zRatio) - (voxelSizePx * 0.5f),
-                    ),
-                    size = Size(
-                        voxelSizePx + (heightInfluence * 3f),
-                        voxelSizePx + (heightInfluence * 3f),
-                    ),
-                )
-            }
-
-            val centerX = size.width * 0.5f
-            val centerY = size.height * 0.5f
-            drawCircle(
-                color = Color.White,
-                radius = 5f,
-                center = Offset(centerX, centerY),
-            )
-            drawLine(
-                color = Color(0xFF8FC8FF),
-                start = Offset(centerX, centerY),
-                end = Offset(centerX, centerY - 22f),
-                strokeWidth = 4f,
-            )
-        }
-    }
-}
-
-@Composable
-private fun VoxelSideProfile(state: ArMeasurementState) {
-    Box(
-        modifier = Modifier
-            .width(150.dp)
-            .height(110.dp)
-            .background(Color(0x1F1F2933), RoundedCornerShape(8.dp)),
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val maxForward = state.voxelRangeMeters.coerceAtLeast(0.1f)
-            val minHeight = -1.5f
-            val maxHeight = 2.5f
-            drawRect(Color(0x143A4654))
-
-            state.voxelPoints.forEach { point ->
-                if (point.relativeZ !in 0f..maxForward) return@forEach
-                val zRatio = (point.relativeZ / maxForward).coerceIn(0f, 1f)
-                val yRatio = (1f - ((point.relativeY - minHeight) / (maxHeight - minHeight))).coerceIn(0f, 1f)
-                val voxelPx = (size.minDimension * (state.voxelSizeMeters / (maxForward + maxHeight))).coerceAtLeast(3f)
-                val color = when {
-                    point.occupancyScore >= 0.55f -> Color(0xFFFF8E8E)
-                    point.occupancyScore >= 0.28f -> Color(0xFFFFC870)
-                    else -> Color(0xFF8C97A3)
-                }.copy(alpha = 0.28f + (point.confidenceScore * 0.5f))
-                drawRect(
-                    color = color,
-                    topLeft = Offset(
-                        (size.width * zRatio) - (voxelPx * 0.5f),
-                        (size.height * yRatio) - (voxelPx * 0.5f),
-                    ),
-                    size = Size(voxelPx, voxelPx),
-                )
-            }
-
-            drawLine(
-                color = Color(0x55FFFFFF),
-                start = Offset(0f, size.height * 0.72f),
-                end = Offset(size.width, size.height * 0.72f),
-                strokeWidth = 2f,
             )
         }
     }

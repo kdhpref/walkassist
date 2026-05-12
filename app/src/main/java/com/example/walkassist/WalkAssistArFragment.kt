@@ -21,7 +21,6 @@ import com.google.ar.core.Point
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
-import com.google.ar.sceneform.math.Vector3
 import com.google.ar.sceneform.ux.ArFragment
 import com.example.walkassist.ocr.OneShotOcrReader
 import java.io.ByteArrayOutputStream
@@ -44,22 +43,6 @@ class WalkAssistArFragment : ArFragment() {
         val depth: Float?,
         val rawDepth: Float?,
         val collision: Float?,
-    )
-
-    private data class VoxelLaneMetrics(
-        val leftDistance: Float?,
-        val centerDistance: Float?,
-        val rightDistance: Float?,
-        val collisionDistance: Float?,
-        val leftOccupancyRatio: Float,
-        val centerOccupancyRatio: Float,
-        val rightOccupancyRatio: Float,
-    )
-
-    private data class VoxelObstacleCluster(
-        val columns: List<VoxelColumnUi>,
-        val nearestDistance: Float,
-        val averageConfidence: Float,
     )
 
     private data class WorldMapLaneMetrics(
@@ -167,7 +150,6 @@ class WalkAssistArFragment : ArFragment() {
         halfRangeMeters = 5f,
         cellSizeMeters = 0.2f,
     )
-    private val worldVoxelModel = WorldVoxelModel()
 
     private val collisionHistory = ArrayDeque<Float>()
     private val directionHistory = ArrayDeque<String>()
@@ -254,15 +236,6 @@ class WalkAssistArFragment : ArFragment() {
                     worldMapCellSizeMeters = worldLocalMap.cellSizeMeters(),
                     worldMapObservationCount = worldLocalMap.totalObservationCount(),
                     worldMapConfidenceScore = worldLocalMap.averageConfidenceScore(),
-                    voxelColumns = emptyList(),
-                    voxelPoints = emptyList(),
-                    voxelOverlayPoints = emptyList(),
-                    voxelRangeMeters = 0f,
-                    voxelSizeMeters = 0f,
-                    voxelKnownCount = 0,
-                    voxelOccupiedCount = 0,
-                    voxelObstacleColumns = 0,
-                    voxelConfidenceScore = 0,
                     note = "ARCore needs visible feature points and steady motion.",
                 ),
             )
@@ -318,9 +291,6 @@ class WalkAssistArFragment : ArFragment() {
                     .thenBy { it.distanceMeters ?: Float.MAX_VALUE },
             )
             .firstOrNull()
-        val voxelSnapshot = emptyList<VoxelColumnUi>()
-        val voxelPoints = emptyList<VoxelPointUi>()
-        val voxelOverlayPoints = emptyList<VoxelOverlayPointUi>()
 
         val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left", floorMaskState)
         val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center", floorMaskState)
@@ -488,15 +458,6 @@ class WalkAssistArFragment : ArFragment() {
                 worldMapLeftFreeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
                 worldMapCenterFreeSpaceMeters = worldMapLaneMetrics.centerFreeSpaceMeters,
                 worldMapRightFreeSpaceMeters = worldMapLaneMetrics.rightFreeSpaceMeters,
-                voxelColumns = voxelSnapshot,
-                voxelPoints = voxelPoints,
-                voxelOverlayPoints = voxelOverlayPoints,
-                voxelRangeMeters = 0f,
-                voxelSizeMeters = 0f,
-                voxelKnownCount = 0,
-                voxelOccupiedCount = 0,
-                voxelObstacleColumns = 0,
-                voxelConfidenceScore = 0,
                 vlmModelName = vlmVisionState?.interpretation?.modelName.orEmpty(),
                 vlmRiskLabel = vlmVisionState?.interpretation?.risk?.name?.lowercase().orEmpty(),
                 vlmSuggestedAction = vlmVisionState?.interpretation?.suggestedAction?.name?.lowercase().orEmpty(),
@@ -528,6 +489,7 @@ class WalkAssistArFragment : ArFragment() {
         val localObjectAnalyzer = objectAnalyzer
         val localCrosswalkDetector = crosswalkPatternDetector
         val localVlmInterpreter = vlmSceneInterpreter
+        val pitchRadians = Math.toRadians(computePitchDownDegrees(frame).toDouble()).toFloat()
 
         lastDetectionStartedAtMs = now
         detectionInFlight.set(true)
@@ -588,6 +550,9 @@ class WalkAssistArFragment : ArFragment() {
                                 source = DistanceSource.UNKNOWN,
                                 riskLevel = RiskLevel.SAFE,
                             ),
+                            segmentCoverageRatio = detection.segmentCoverageRatio,
+                            segmentCenterXRatio = detection.segmentCenterXRatio,
+                            segmentCenterYRatio = detection.segmentCenterYRatio,
                         )
                     },
                     timestampNanos = frame.timestamp,
@@ -602,7 +567,7 @@ class WalkAssistArFragment : ArFragment() {
                     bitmap = bitmap,
                     timestampMillis = frame.timestamp / 1_000_000L,
                     source = SpatialFrameSource.LIVE_CAMERA,
-                    pitchRadians = 0f,
+                    pitchRadians = pitchRadians,
                 )
                 if (shouldRunVlm || vlmInvocationPolicy.shouldInvoke(spatialFrame, primaryAnalysis)) {
                     val vlmStartedAtMs = SystemClock.elapsedRealtime()
@@ -657,6 +622,9 @@ class WalkAssistArFragment : ArFragment() {
                             lane = classifyScreenLane(centerXRatio),
                             isStable = detection.trackingState?.isStable == true,
                             trackId = detection.trackingState?.trackId,
+                            segmentCoverageRatio = detection.segmentCoverageRatio,
+                            segmentCenterXRatio = detection.segmentCenterXRatio,
+                            segmentCenterYRatio = detection.segmentCenterYRatio,
                         )
                     }
                 lastObjectDetections = prioritizedDetections
@@ -819,104 +787,6 @@ class WalkAssistArFragment : ArFragment() {
         ) ?: return false
         val floorMarginPixels = state.imageHeight * 0.025f
         return imageY >= floorBoundaryY - floorMarginPixels
-    }
-
-    private fun evaluateVoxelLanes(
-        columns: List<VoxelColumnUi>,
-    ): VoxelLaneMetrics {
-        val obstacleColumns = columns.filter { column ->
-            column.relativeZ in 0.25f..5.0f &&
-                column.occupancyScore >= 0.2f &&
-                column.confidenceScore >= 0.22f &&
-                column.heightMeters >= -1.05f
-        }
-
-        val obstacleClusters = buildVoxelObstacleClusters(obstacleColumns)
-
-        fun laneColumns(lane: String): List<VoxelColumnUi> {
-            return obstacleColumns.filter { classifyLane(it.relativeX) == lane }
-        }
-
-        fun nearestDistance(lane: String): Float? {
-            return obstacleClusters
-                .filter { cluster ->
-                    cluster.columns.any { classifyLane(it.relativeX) == lane }
-                }
-                .map { it.nearestDistance }
-                .minOrNull()
-        }
-
-        fun occupancyRatio(lane: String): Float {
-            val relevant = columns.filter { it.relativeZ in 0.25f..4.5f && classifyLane(it.relativeX) == lane }
-            if (relevant.isEmpty()) return 0f
-            val occupied = relevant.count {
-                it.occupancyScore >= 0.2f &&
-                    it.confidenceScore >= 0.22f &&
-                    it.heightMeters >= -1.05f
-            }
-            return (occupied.toFloat() / relevant.size.toFloat()).coerceIn(0f, 1f)
-        }
-
-        val leftDistance = nearestDistance("left")
-        val centerDistance = nearestDistance("center")
-        val rightDistance = nearestDistance("right")
-        return VoxelLaneMetrics(
-            leftDistance = leftDistance,
-            centerDistance = centerDistance,
-            rightDistance = rightDistance,
-            collisionDistance = listOfNotNull(leftDistance, centerDistance, rightDistance).minOrNull(),
-            leftOccupancyRatio = occupancyRatio("left"),
-            centerOccupancyRatio = occupancyRatio("center"),
-            rightOccupancyRatio = occupancyRatio("right"),
-        )
-    }
-
-    private fun buildVoxelObstacleClusters(
-        columns: List<VoxelColumnUi>,
-    ): List<VoxelObstacleCluster> {
-        if (columns.isEmpty()) return emptyList()
-
-        val remaining = columns.toMutableList()
-        val clusters = mutableListOf<VoxelObstacleCluster>()
-        val lateralThreshold = worldVoxelModel.voxelSizeMeters() * 1.7f
-        val forwardThreshold = worldVoxelModel.voxelSizeMeters() * 1.7f
-
-        while (remaining.isNotEmpty()) {
-            val seed = remaining.removeAt(0)
-            val clusterColumns = mutableListOf(seed)
-            var index = 0
-            while (index < clusterColumns.size) {
-                val current = clusterColumns[index]
-                val iterator = remaining.iterator()
-                while (iterator.hasNext()) {
-                    val candidate = iterator.next()
-                    if (
-                        abs(candidate.relativeX - current.relativeX) <= lateralThreshold &&
-                        abs(candidate.relativeZ - current.relativeZ) <= forwardThreshold
-                    ) {
-                        clusterColumns += candidate
-                        iterator.remove()
-                    }
-                }
-                index += 1
-            }
-
-            if (clusterColumns.size < 2) continue
-
-            val nearestDistance = clusterColumns
-                .map { sqrt((it.relativeX * it.relativeX) + (it.relativeZ * it.relativeZ)) }
-                .minOrNull() ?: continue
-            val averageConfidence = clusterColumns.map { it.confidenceScore }.average().toFloat()
-            if (averageConfidence < 0.24f) continue
-
-            clusters += VoxelObstacleCluster(
-                columns = clusterColumns,
-                nearestDistance = nearestDistance,
-                averageConfidence = averageConfidence,
-            )
-        }
-
-        return clusters.sortedBy { it.nearestDistance }
     }
 
     private fun evaluateWorldMapLanes(
@@ -2058,40 +1928,6 @@ class WalkAssistArFragment : ArFragment() {
             "crosswalk" -> "횡단보도"
             else -> label
         }
-    }
-
-    private fun buildVoxelOverlayPoints(
-        voxelPoints: List<VoxelPointUi>,
-    ): List<VoxelOverlayPointUi> {
-        val sceneCamera = arSceneView.scene.camera
-        val viewWidth = arSceneView.width.toFloat().coerceAtLeast(1f)
-        val viewHeight = arSceneView.height.toFloat().coerceAtLeast(1f)
-
-        return voxelPoints
-            .asSequence()
-            .filter { it.relativeZ in 0.2f..5f }
-            .sortedWith(
-                compareByDescending<VoxelPointUi> { it.confidenceScore }
-                    .thenBy { it.relativeZ },
-            )
-            .take(260)
-            .mapNotNull { point ->
-                val screenPoint = sceneCamera.worldToScreenPoint(
-                    Vector3(point.worldX, point.worldY, point.worldZ),
-                )
-                val xRatio = screenPoint.x / viewWidth
-                val yRatio = screenPoint.y / viewHeight
-                if (!xRatio.isFinite() || !yRatio.isFinite()) return@mapNotNull null
-                if (xRatio !in -0.1f..1.1f || yRatio !in -0.1f..1.1f) return@mapNotNull null
-
-                VoxelOverlayPointUi(
-                    xRatio = xRatio.coerceIn(0f, 1f),
-                    yRatio = yRatio.coerceIn(0f, 1f),
-                    occupancyScore = point.occupancyScore,
-                    confidenceScore = point.confidenceScore,
-                )
-            }
-            .toList()
     }
 
     private fun distanceMeters(

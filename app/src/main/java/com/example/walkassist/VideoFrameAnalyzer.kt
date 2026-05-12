@@ -80,6 +80,9 @@ class VideoFrameAnalyzer(
                     pitchRadians = pitchRadians,
                     floorSegmentation = floorSegmentation,
                 ),
+                segmentCoverageRatio = detection.segmentCoverageRatio,
+                segmentCenterXRatio = detection.segmentCenterXRatio,
+                segmentCenterYRatio = detection.segmentCenterYRatio,
             )
         }
         val trackedObjects = objectTracker.update(
@@ -150,6 +153,9 @@ class VideoFrameAnalyzer(
                     lane = classifyScreenLane(centerXRatio),
                     isStable = detection.trackingState?.isStable == true,
                     trackId = detection.trackingState?.trackId,
+                    segmentCoverageRatio = detection.segmentCoverageRatio,
+                    segmentCenterXRatio = detection.segmentCenterXRatio,
+                    segmentCenterYRatio = detection.segmentCenterYRatio,
                     objectTimeToCollisionSeconds = detection.trackingState?.timeToCollisionSeconds,
                     objectClosingSpeedMetersPerSecond = detection.trackingState?.closingSpeedMetersPerSecond,
                 )

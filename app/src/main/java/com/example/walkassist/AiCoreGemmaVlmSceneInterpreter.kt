@@ -71,7 +71,7 @@ class AiCoreGemmaVlmSceneInterpreter(
                 model.generateContent(
                     generateContentRequest(
                         ImagePart(vlmBitmap),
-                        TextPart(buildPrompt(primaryAnalysis, crosswalk)),
+                        TextPart(buildPrompt(frame, primaryAnalysis, crosswalk)),
                     ) {
                         temperature = 0.1f
                         topK = 8
@@ -112,6 +112,7 @@ class AiCoreGemmaVlmSceneInterpreter(
     }
 
     private fun buildPrompt(
+        frame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
         crosswalk: CrosswalkPatternResult,
     ): String {
@@ -119,7 +120,19 @@ class AiCoreGemmaVlmSceneInterpreter(
         val objects = primaryAnalysis.detections
             .take(8)
             .joinToString(separator = "; ") { detection ->
-                "${detection.label}:${String.format("%.2f", detection.confidence)}"
+                buildString {
+                    append("${detection.label}:${String.format("%.2f", detection.confidence)}")
+                    detection.distanceEstimate.distanceMeters?.let {
+                        append("@${String.format("%.1f", it)}m")
+                    }
+                    detection.segmentCoverageRatio?.let {
+                        append(":seg=${String.format("%.2f", it)}")
+                    }
+                    if (detection.segmentCenterXRatio != null && detection.segmentCenterYRatio != null) {
+                        append(":center=${String.format("%.2f", detection.segmentCenterXRatio)},")
+                        append(String.format("%.2f", detection.segmentCenterYRatio))
+                    }
+                }
             }
             .ifBlank { "none" }
         return """
@@ -130,6 +143,7 @@ Fast CV primary result:
 - pathClearMeters=${metrics?.pathClearMeters?.let { String.format("%.2f", it) } ?: "unknown"}
 - centerObstacleMeters=${metrics?.centerObstacleMeters?.let { String.format("%.2f", it) } ?: "unknown"}
 - collisionDistanceMeters=${metrics?.collisionDistanceMeters?.let { String.format("%.2f", it) } ?: "unknown"}
+- phonePitchDownDegrees=${String.format("%.1f", Math.toDegrees(frame.pitchRadians.toDouble()))}
 - crosswalkDetected=${crosswalk.detected}
 - crosswalkScore=${String.format("%.2f", crosswalk.score)}
 - objects=$objects
