@@ -34,6 +34,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -68,6 +69,7 @@ import com.example.walkassist.feedback.runtime.FeedbackManager
 import com.example.walkassist.feedback.ui.FeedbackOverlayCard
 import com.example.walkassist.map.MapNavigationActivity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
@@ -308,9 +310,17 @@ private fun WalkAssistRootOverlay(
     var replayState by remember { mutableStateOf(ArCoreReplayController.currentState()) }
     val context = LocalContext.current
     var debugFlags by remember { mutableStateOf(WalkAssistSettings.debugPipelineFlags(context)) }
+    val resourceMonitor = remember(context) { ResourceMonitor(context.applicationContext) }
+    var resourceUsage by remember { mutableStateOf(ResourceUsageSnapshot()) }
     val updateDebugFlags: (DebugPipelineFlags) -> Unit = { nextFlags ->
         debugFlags = nextFlags
         WalkAssistSettings.setDebugPipelineFlags(context, nextFlags)
+    }
+    LaunchedEffect(resourceMonitor) {
+        while (true) {
+            resourceUsage = resourceMonitor.sample()
+            delay(1_000L)
+        }
     }
     DisposableEffect(Unit) {
         val listener: (ArCoreReplayUiState) -> Unit = { replayState = it }
@@ -352,6 +362,13 @@ private fun WalkAssistRootOverlay(
             onClick = openSettings,
             modifier = Modifier
                 .align(Alignment.TopEnd)
+                .padding(top = 104.dp, end = 6.dp),
+        )
+
+        ResourceUsagePanel(
+            usage = resourceUsage,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
                 .padding(top = 14.dp, end = 6.dp),
         )
 
@@ -376,6 +393,51 @@ private fun WalkAssistRootOverlay(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(start = 14.dp, bottom = 18.dp),
+        )
+    }
+}
+
+@Composable
+private fun ResourceUsagePanel(
+    usage: ResourceUsageSnapshot,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .width(116.dp)
+            .background(Color(0xB8121820), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Text(
+            text = "Perf",
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(modifier = Modifier.height(5.dp))
+        ResourceUsageRow("CPU", "${usage.cpuPercent}%")
+        ResourceUsageRow("GPU", usage.gpuPercent?.let { "$it%" } ?: "--")
+        ResourceUsageRow("RAM", "${usage.ramPercent}% ${usage.ramMegabytes}MB")
+    }
+}
+
+@Composable
+private fun ResourceUsageRow(
+    label: String,
+    value: String,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = Color(0xFFD8E3EE), fontSize = 11.sp)
+        Text(
+            value,
+            color = Color(0xFFB7F7CE),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.End,
         )
     }
 }
@@ -765,8 +827,26 @@ private fun ObjectDetectionOverlay(
                     .offset(x = boxLeft, y = boxTop)
                     .width(boxWidth)
                     .height(boxHeight)
-                    .border(2.dp, boxStrokeColor, RoundedCornerShape(8.dp)),
+                    .border(2.dp, distanceColor(detection.distanceMeters), RoundedCornerShape(8.dp)),
             ) {
+                detection.distanceMeters?.let { distance ->
+                    DistanceRail(
+                        distanceMeters = distance,
+                        isReference = detection.distanceIsReference,
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 3.dp)
+                            .width(7.dp)
+                            .height(boxHeight * 0.82f),
+                    )
+                    DistanceBadge(
+                        distanceMeters = distance,
+                        isReference = detection.distanceIsReference,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 5.dp),
+                    )
+                }
                 Text(
                     text = buildString {
                         append(presentableLabel(detection.label))
@@ -940,6 +1020,49 @@ private fun DebugOverlay(
 }
 
 @Composable
+private fun DistanceBadge(
+    distanceMeters: Float,
+    isReference: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Text(
+        text = "거리 ${formatMeters(distanceMeters, isReference)}",
+        color = Color.White,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Center,
+        modifier = modifier
+            .background(distanceColor(distanceMeters).copy(alpha = 0.88f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+    )
+}
+
+@Composable
+private fun DistanceRail(
+    distanceMeters: Float,
+    isReference: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val fillRatio = if (isReference) {
+        0.08f
+    } else {
+        (1f - (distanceMeters / 5f)).coerceIn(0.08f, 1f)
+    }
+    Box(
+        modifier = modifier
+            .background(Color(0x66121820), RoundedCornerShape(99.dp)),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .fillMaxSize(fillRatio)
+                .background(distanceColor(distanceMeters), RoundedCornerShape(99.dp)),
+        )
+    }
+}
+
+@Composable
 private fun DebugToggleRow(
     label: String,
     enabled: Boolean,
@@ -1025,6 +1148,16 @@ private fun presentableRisk(riskLabel: String): Pair<String, Color> {
         "watch" -> "주의" to Color(0xFFFFDB7A)
         "stable" -> "안전" to Color(0xFF96E2B5)
         else -> "주의" to Color(0xFFD8E3EE)
+    }
+}
+
+private fun distanceColor(distanceMeters: Float?): Color {
+    val distance = distanceMeters ?: return Color(0xFFFFB648)
+    return when {
+        distance < 0.8f -> Color(0xFFE85D75)
+        distance < 1.5f -> Color(0xFFDDAA45)
+        distance < 3f -> Color(0xFF5CBF88)
+        else -> Color(0xFF7EC7FF)
     }
 }
 
