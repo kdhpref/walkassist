@@ -404,47 +404,26 @@ private fun ResourceUsagePanel(
 ) {
     Column(
         modifier = modifier
-            .width(136.dp)
-            .background(Color(0xB8121820), RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .width(178.dp),
+        horizontalAlignment = Alignment.End,
     ) {
-        Text(
-            text = "Perf",
-            color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(modifier = Modifier.height(5.dp))
-        ResourceUsageRow("CPU", "${formatPercent(usage.cpuCorePercent)}% core")
-        ResourceUsageRow("Ctot", "${formatPercent(usage.cpuDevicePercent)}%/${usage.cpuCoreCount}")
-        ResourceUsageRow("SYS", usage.systemCpuPercent?.let { "${formatPercent(it)}%" } ?: "--")
-        ResourceUsageRow("GPU", usage.gpuPercent?.let { "$it%" } ?: "--")
-        ResourceUsageRow("Gsrc", usage.gpuSourceLabel)
-        ResourceUsageRow("APP", "${usage.appRamMegabytes}MB")
-        ResourceUsageRow("RAM", "${usage.systemRamPercent}%")
-        ResourceUsageRow("THM", usage.thermalStatusLabel)
+        ResourceUsageText("CPU ${formatPercent(usage.cpuCorePercent)}% / ${formatPercent(usage.cpuDevicePercent)}%")
+        ResourceUsageText("GPU ${usage.gpuPercent?.let { "$it%" } ?: "--"}")
+        ResourceUsageText("RAM ${usage.systemRamPercent}%")
     }
 }
 
 @Composable
-private fun ResourceUsageRow(
-    label: String,
-    value: String,
+private fun ResourceUsageText(
+    text: String,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(label, color = Color(0xFFD8E3EE), fontSize = 11.sp)
-        Text(
-            value,
-            color = Color(0xFFB7F7CE),
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            textAlign = TextAlign.End,
-        )
-    }
+    Text(
+        text = text,
+        color = Color(0xFF68F29A),
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.End,
+    )
 }
 
 @Composable
