@@ -454,6 +454,7 @@ class WalkAssistArFragment : ArFragment() {
         val crosswalkState = if (debugFlags.crosswalkEnabled) currentCrosswalkState(frame.timestamp) else null
         val vlmVisionState = if (debugFlags.vlmEnabled) currentVlmVisionState(frame.timestamp) else null
         val rawDepthHits = if (debugFlags.rawDepthEnabled) sampleRawDepthCorridor(frame) else emptyList()
+        val depthGridCells = if (debugFlags.rawDepthEnabled) sampleRawDepthGrid(frame) else emptyList()
         val cameraPose = frame.camera.displayOrientedPose
         val mapObservations = (corridorHits + rawDepthHits).map {
             WorldMapObservation(
@@ -649,6 +650,7 @@ class WalkAssistArFragment : ArFragment() {
                 crosswalkYoloConfidence = crosswalkState?.yoloConfidence ?: 0f,
                 crosswalkModeLabel = crosswalkState?.modeLabel.orEmpty(),
                 objectDetections = overlayDetections,
+                depthGridCells = depthGridCells,
                 planeDetections = emptyList(),
                 planePolygons = emptyList(),
                 worldMapCells = worldMapSnapshot,
@@ -1660,6 +1662,70 @@ class WalkAssistArFragment : ArFragment() {
         } catch (_: IllegalStateException) {
             emptyList()
         }
+    }
+
+    private fun sampleRawDepthGrid(frame: Frame): List<DepthGridCell> {
+        val width = arSceneView.width.toFloat().coerceAtLeast(1f)
+        val height = arSceneView.height.toFloat().coerceAtLeast(1f)
+        return try {
+            frame.acquireRawDepthImage16Bits().use { rawDepthImage ->
+                frame.acquireRawDepthConfidenceImage().use { confidenceImage ->
+                    buildList {
+                        for (row in 0 until 4) {
+                            for (column in 0 until 4) {
+                                val viewX = width * ((column + 0.5f) / 4f)
+                                val viewY = height * ((row + 0.5f) / 4f)
+                                val sample = rawDepthSampleAtViewPoint(
+                                    frame = frame,
+                                    rawDepthImage = rawDepthImage,
+                                    confidenceImage = confidenceImage,
+                                    viewX = viewX,
+                                    viewY = viewY,
+                                )
+                                add(
+                                    DepthGridCell(
+                                        column = column,
+                                        row = row,
+                                        distanceMeters = sample?.depthMillimeters?.let { it / 1000f },
+                                        confidence = sample?.confidence ?: 0f,
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (_: NotYetAvailableException) {
+            emptyList()
+        } catch (_: IllegalStateException) {
+            emptyList()
+        }
+    }
+
+    private fun rawDepthSampleAtViewPoint(
+        frame: Frame,
+        rawDepthImage: Image,
+        confidenceImage: Image,
+        viewX: Float,
+        viewY: Float,
+    ): RawDepthSample? {
+        val textureCoordinates = FloatArray(2)
+        frame.transformCoordinates2d(
+            Coordinates2d.VIEW,
+            floatArrayOf(viewX, viewY),
+            Coordinates2d.TEXTURE_NORMALIZED,
+            textureCoordinates,
+        )
+        val textureX = textureCoordinates[0]
+        val textureY = textureCoordinates[1]
+        if (textureX !in 0f..1f || textureY !in 0f..1f) return null
+
+        return sampleRawDepthSample(
+            depthImage = rawDepthImage,
+            confidenceImage = confidenceImage,
+            centerX = (textureX * rawDepthImage.width).toInt().coerceIn(0, rawDepthImage.width - 1),
+            centerY = (textureY * rawDepthImage.height).toInt().coerceIn(0, rawDepthImage.height - 1),
+        )
     }
 
     private fun rawDepthHitAt(

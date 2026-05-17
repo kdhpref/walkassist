@@ -44,6 +44,13 @@ data class PlanePolygonOverlay(
     val points: List<OverlayPointRatio>,
 )
 
+data class DepthGridCell(
+    val column: Int,
+    val row: Int,
+    val distanceMeters: Float?,
+    val confidence: Float = 0f,
+)
+
 data class ArMeasurementState(
     val trackingLabel: String = "initializing",
     val trackingFailureLabel: String = "",
@@ -76,6 +83,7 @@ data class ArMeasurementState(
     val crosswalkYoloConfidence: Float = 0f,
     val crosswalkModeLabel: String = "",
     val objectDetections: List<ObjectOverlayDetection> = emptyList(),
+    val depthGridCells: List<DepthGridCell> = emptyList(),
     val planeDetections: List<PlaneOverlayDetection> = emptyList(),
     val planePolygons: List<PlanePolygonOverlay> = emptyList(),
     val worldMapCells: List<WorldMapCellUi> = emptyList(),

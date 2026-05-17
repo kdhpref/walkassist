@@ -680,13 +680,6 @@ private fun MeasurementOverlay(
             modifier = Modifier.fillMaxSize(),
         )
 
-        ObjectDistancePanel(
-            detections = state.objectDetections,
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(top = 124.dp, end = 14.dp),
-        )
-
         CompactWorldMapOverlay(
             state = state,
             modifier = Modifier
@@ -782,6 +775,10 @@ private fun MeasurementOverlay(
         )
 
         if (debugVisible) {
+            DepthGridOverlay(
+                cells = state.depthGridCells,
+                modifier = Modifier.fillMaxSize(),
+            )
             DebugOverlay(
                 state = state,
                 debugFlags = debugFlags,
@@ -834,31 +831,11 @@ private fun ObjectDetectionOverlay(
                     .offset(x = boxLeft, y = boxTop)
                     .width(boxWidth)
                     .height(boxHeight)
-                    .border(4.dp, distanceColor(detection.distanceMeters), RoundedCornerShape(8.dp)),
+                    .border(2.dp, Color(0xFFFFB648), RoundedCornerShape(8.dp)),
             ) {
-                DistanceRail(
-                    distanceMeters = detection.distanceMeters,
-                    isReference = detection.distanceIsReference,
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .padding(end = 3.dp)
-                        .width(8.dp)
-                        .height(boxHeight * 0.82f),
-                )
-                DistanceBadge(
-                    distanceMeters = detection.distanceMeters,
-                    isReference = detection.distanceIsReference,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 5.dp),
-                )
                 Text(
                     text = buildString {
                         append(presentableLabel(detection.label))
-                        detection.distanceMeters?.let {
-                            append(" ")
-                            append(formatMetersShort(it, detection.distanceIsReference))
-                        }
                         detection.objectTimeToCollisionSeconds?.let {
                             append(" TTC ")
                             append(formatSeconds(it))
@@ -883,6 +860,44 @@ private fun ObjectDetectionOverlay(
                         .background(labelBackground, RoundedCornerShape(8.dp))
                         .padding(horizontal = 8.dp, vertical = 4.dp),
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DepthGridOverlay(
+    cells: List<DepthGridCell>,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val cellWidth = maxWidth / 4
+        val cellHeight = maxHeight / 4
+        val cellsByPosition = cells.associateBy { it.column to it.row }
+
+        for (row in 0 until 4) {
+            for (column in 0 until 4) {
+                val cell = cellsByPosition[column to row]
+                val distance = cell?.distanceMeters
+                Box(
+                    modifier = Modifier
+                        .offset(x = cellWidth * column, y = cellHeight * row)
+                        .width(cellWidth)
+                        .height(cellHeight)
+                        .border(1.dp, Color(0x66FFFFFF)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = distance?.let(::formatMetersShort) ?: "--",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .background(depthGridColor(distance), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
             }
         }
     }
@@ -1025,107 +1040,6 @@ private fun DebugOverlay(
 }
 
 @Composable
-private fun ObjectDistancePanel(
-    detections: List<ObjectOverlayDetection>,
-    modifier: Modifier = Modifier,
-) {
-    if (detections.isEmpty()) return
-    Column(
-        modifier = modifier
-            .width(176.dp)
-            .background(Color(0xB8121820), RoundedCornerShape(12.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
-    ) {
-        Text(
-            text = "Objects",
-            color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(modifier = Modifier.height(5.dp))
-        detections.take(5).forEach { detection ->
-            ObjectDistanceRow(detection = detection)
-        }
-    }
-}
-
-@Composable
-private fun ObjectDistanceRow(
-    detection: ObjectOverlayDetection,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = presentableLabel(detection.label),
-            color = Color(0xFFD8E3EE),
-            fontSize = 11.sp,
-            modifier = Modifier.width(78.dp),
-        )
-        Text(
-            text = distanceText(detection.distanceMeters, detection.distanceIsReference),
-            color = distanceColor(detection.distanceMeters),
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.End,
-            modifier = Modifier.width(52.dp),
-        )
-        Text(
-            text = "${(detection.confidence * 100f).toInt()}%",
-            color = Color(0xFFB7F7CE),
-            fontSize = 10.sp,
-            textAlign = TextAlign.End,
-            modifier = Modifier.width(30.dp),
-        )
-    }
-}
-
-@Composable
-private fun DistanceBadge(
-    distanceMeters: Float?,
-    isReference: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    Text(
-        text = "거리 ${distanceText(distanceMeters, isReference)}",
-        color = Color.White,
-        fontSize = 12.sp,
-        fontWeight = FontWeight.Bold,
-        textAlign = TextAlign.Center,
-        modifier = modifier
-            .background(distanceColor(distanceMeters).copy(alpha = 0.88f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-    )
-}
-
-@Composable
-private fun DistanceRail(
-    distanceMeters: Float?,
-    isReference: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val fillRatio = distanceMeters?.let {
-        if (isReference) 0.08f else (1f - (it / 5f)).coerceIn(0.08f, 1f)
-    } ?: 0.08f
-    Box(
-        modifier = modifier
-            .background(Color(0x66121820), RoundedCornerShape(99.dp)),
-        contentAlignment = Alignment.BottomCenter,
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxSize(fillRatio)
-                .background(distanceColor(distanceMeters), RoundedCornerShape(99.dp)),
-        )
-    }
-}
-
-@Composable
 private fun DebugToggleRow(
     label: String,
     enabled: Boolean,
@@ -1214,21 +1128,14 @@ private fun presentableRisk(riskLabel: String): Pair<String, Color> {
     }
 }
 
-private fun distanceColor(distanceMeters: Float?): Color {
+private fun depthGridColor(distanceMeters: Float?): Color {
     val distance = distanceMeters ?: return Color(0xFFFFB648)
     return when {
-        distance < 0.8f -> Color(0xFFE85D75)
-        distance < 1.5f -> Color(0xFFDDAA45)
-        distance < 3f -> Color(0xFF5CBF88)
-        else -> Color(0xFF7EC7FF)
+        distance < 0.8f -> Color(0xDDE85D75)
+        distance < 1.5f -> Color(0xDDDDAA45)
+        distance < 3f -> Color(0xDD5CBF88)
+        else -> Color(0xDD375D7A)
     }
-}
-
-private fun distanceText(
-    distanceMeters: Float?,
-    isReference: Boolean = false,
-): String {
-    return distanceMeters?.let { formatMeters(it, isReference) } ?: "--"
 }
 
 private fun presentableLabel(label: String): String {
