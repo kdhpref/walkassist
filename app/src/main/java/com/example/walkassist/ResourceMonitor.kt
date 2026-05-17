@@ -1,36 +1,55 @@
 package com.example.walkassist
 
 import android.app.ActivityManager
+import android.os.Build
 import android.content.Context
 import android.os.Debug
+import android.os.PowerManager
+import android.os.Process
+import android.os.SystemClock
 import java.io.File
 import kotlin.math.roundToInt
 
 data class ResourceUsageSnapshot(
     val cpuPercent: Float = 0f,
+    val systemCpuPercent: Float = 0f,
     val gpuPercent: Int? = null,
+    val gpuSourceLabel: String = "none",
     val appRamPercent: Float = 0f,
     val appRamMegabytes: Int = 0,
     val systemRamPercent: Int = 0,
+    val thermalStatusLabel: String = "n/a",
 )
 
 class ResourceMonitor(
     context: Context,
 ) {
     private data class CpuTimes(
-        val processTicks: Long,
         val totalTicks: Long,
+        val idleTicks: Long,
     )
 
     private data class GpuTimes(
         val busy: Long,
         val total: Long,
+        val sourceLabel: String,
+    )
+
+    private data class GpuSample(
+        val percent: Int,
+        val sourceLabel: String,
+    )
+
+    private data class AppCpuSample(
+        val cpuMillis: Long,
+        val wallMillis: Long,
     )
 
     private val appContext = context.applicationContext
     private val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-    private val cpuCoreCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
-    private var previousCpuTimes: CpuTimes? = null
+    private val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+    private var previousAppCpuSample: AppCpuSample? = null
+    private var previousSystemCpuTimes: CpuTimes? = null
     private var previousGpuTimes: GpuTimes? = null
     private val gpuBusyFiles = listOf(
         "/sys/class/kgsl/kgsl-3d0/gpubusy",
@@ -44,63 +63,84 @@ class ResourceMonitor(
     )
 
     fun sample(): ResourceUsageSnapshot {
-        val cpuPercent = sampleCpuPercent()
-        val gpuPercent = sampleGpuPercent()
+        val cpu = sampleCpu()
+        val gpu = sampleGpu()
         val ram = sampleRam()
         return ResourceUsageSnapshot(
-            cpuPercent = cpuPercent,
-            gpuPercent = gpuPercent,
+            cpuPercent = cpu.first,
+            systemCpuPercent = cpu.second,
+            gpuPercent = gpu?.percent,
+            gpuSourceLabel = gpu?.sourceLabel ?: "none",
             appRamPercent = ram.appPercent,
             appRamMegabytes = ram.appMegabytes,
             systemRamPercent = ram.systemPercent,
+            thermalStatusLabel = sampleThermalStatus(),
         )
     }
 
-    private fun sampleCpuPercent(): Float {
-        val current = readCpuTimes() ?: return 0f
-        val previous = previousCpuTimes.also { previousCpuTimes = current } ?: return 0f
-        val processDelta = (current.processTicks - previous.processTicks).coerceAtLeast(0L)
+    private fun sampleCpu(): Pair<Float, Float> {
+        val appPercent = sampleAppCpuPercent()
+        val systemPercent = sampleSystemCpuPercent()
+        return appPercent to systemPercent
+    }
+
+    private fun sampleAppCpuPercent(): Float {
+        val current = AppCpuSample(
+            cpuMillis = Process.getElapsedCpuTime(),
+            wallMillis = SystemClock.elapsedRealtime(),
+        )
+        val previous = previousAppCpuSample.also { previousAppCpuSample = current } ?: return 0f
+        val cpuDelta = (current.cpuMillis - previous.cpuMillis).coerceAtLeast(0L)
+        val wallDelta = (current.wallMillis - previous.wallMillis).coerceAtLeast(1L)
+        return ((cpuDelta.toDouble() / wallDelta.toDouble()) * 100.0)
+            .toFloat()
+            .coerceIn(0f, 999f)
+    }
+
+    private fun sampleSystemCpuPercent(): Float {
+        val current = readSystemCpuTimes() ?: return 0f
+        val previous = previousSystemCpuTimes.also { previousSystemCpuTimes = current } ?: return 0f
         val totalDelta = (current.totalTicks - previous.totalTicks).coerceAtLeast(1L)
-        return ((processDelta.toDouble() * cpuCoreCount.toDouble() / totalDelta.toDouble()) * 100.0)
+        val idleDelta = (current.idleTicks - previous.idleTicks).coerceAtLeast(0L)
+        return (((totalDelta - idleDelta).toDouble() / totalDelta.toDouble()) * 100.0)
             .toFloat()
             .coerceIn(0f, 100f)
     }
 
-    private fun readCpuTimes(): CpuTimes? {
-        val processStat = runCatching { File("/proc/self/stat").readText() }.getOrNull() ?: return null
-        val statTail = processStat.substringAfterLast(") ").split(' ')
-        if (statTail.size <= 13) return null
-        val userTicks = statTail.getOrNull(11)?.toLongOrNull() ?: return null
-        val systemTicks = statTail.getOrNull(12)?.toLongOrNull() ?: return null
-        val totalTicks = runCatching { File("/proc/stat").useLines { lines -> lines.first() } }
+    private fun readSystemCpuTimes(): CpuTimes? {
+        val ticks = runCatching { File("/proc/stat").useLines { lines -> lines.first() } }
             .getOrNull()
             ?.split(Regex("\\s+"))
             ?.drop(1)
             ?.mapNotNull { it.toLongOrNull() }
-            ?.sum()
             ?: return null
+        if (ticks.size < 5) return null
+        val idleTicks = ticks[3] + ticks.getOrElse(4) { 0L }
         return CpuTimes(
-            processTicks = userTicks + systemTicks,
-            totalTicks = totalTicks,
+            totalTicks = ticks.sum(),
+            idleTicks = idleTicks,
         )
     }
 
-    private fun sampleGpuPercent(): Int? {
+    private fun sampleGpu(): GpuSample? {
         readGpuPercentFile()?.let { return it }
 
         readGpuBusyTimes()?.let { current ->
             val previous = previousGpuTimes.also { previousGpuTimes = current } ?: return null
             val busyDelta = (current.busy - previous.busy).coerceAtLeast(0L)
             val totalDelta = (current.total - previous.total).coerceAtLeast(1L)
-            return ((busyDelta.toDouble() / totalDelta.toDouble()) * 100.0)
-                .roundToInt()
-                .coerceIn(0, 100)
+            return GpuSample(
+                percent = ((busyDelta.toDouble() / totalDelta.toDouble()) * 100.0)
+                    .roundToInt()
+                    .coerceIn(0, 100),
+                sourceLabel = current.sourceLabel,
+            )
         }
 
         return null
     }
 
-    private fun readGpuPercentFile(): Int? {
+    private fun readGpuPercentFile(): GpuSample? {
         return gpuPercentFiles.firstNotNullOfOrNull { path ->
             val value = runCatching { File(path).readText().trim() }.getOrNull()
                 ?.split(Regex("\\s+"))
@@ -108,7 +148,10 @@ class ResourceMonitor(
                 ?.toFloatOrNull()
             value?.let {
                 val normalized = if (it > 100f) it / 10f else it
-                normalized.roundToInt().coerceIn(0, 100)
+                GpuSample(
+                    percent = normalized.roundToInt().coerceIn(0, 100),
+                    sourceLabel = gpuSourceLabel(path),
+                )
             }
         }
     }
@@ -119,10 +162,25 @@ class ResourceMonitor(
             val busy = parts?.getOrNull(0)?.toLongOrNull()
             val total = parts?.getOrNull(1)?.toLongOrNull()
             if (busy != null && total != null && total > 0L) {
-                GpuTimes(busy = busy, total = total)
+                GpuTimes(
+                    busy = busy,
+                    total = total,
+                    sourceLabel = gpuSourceLabel(path),
+                )
             } else {
                 null
             }
+        }
+    }
+
+    private fun gpuSourceLabel(path: String): String {
+        return when {
+            "kgsl" in path && "percentage" in path -> "kgsl%"
+            "kgsl" in path -> "kgsl"
+            "mali" in path -> "mali"
+            "gpu_busy" in path -> "busy"
+            "load" in path -> "load"
+            else -> File(path).name.take(8)
         }
     }
 
@@ -153,5 +211,19 @@ class ResourceMonitor(
             appMegabytes = appPssKilobytes / 1024,
             systemPercent = systemPercent,
         )
+    }
+
+    private fun sampleThermalStatus(): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return "n/a"
+        return when (powerManager.currentThermalStatus) {
+            PowerManager.THERMAL_STATUS_NONE -> "none"
+            PowerManager.THERMAL_STATUS_LIGHT -> "light"
+            PowerManager.THERMAL_STATUS_MODERATE -> "mod"
+            PowerManager.THERMAL_STATUS_SEVERE -> "severe"
+            PowerManager.THERMAL_STATUS_CRITICAL -> "crit"
+            PowerManager.THERMAL_STATUS_EMERGENCY -> "emerg"
+            PowerManager.THERMAL_STATUS_SHUTDOWN -> "stop"
+            else -> "n/a"
+        }
     }
 }

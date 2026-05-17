@@ -404,7 +404,7 @@ private fun ResourceUsagePanel(
 ) {
     Column(
         modifier = modifier
-            .width(116.dp)
+            .width(136.dp)
             .background(Color(0xB8121820), RoundedCornerShape(12.dp))
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
@@ -415,10 +415,13 @@ private fun ResourceUsagePanel(
             fontWeight = FontWeight.Bold,
         )
         Spacer(modifier = Modifier.height(5.dp))
-        ResourceUsageRow("CPU", "${formatPercent(usage.cpuPercent)}%")
+        ResourceUsageRow("CPU", "${formatPercent(usage.cpuPercent)}% app")
+        ResourceUsageRow("SYS", "${formatPercent(usage.systemCpuPercent)}%")
         ResourceUsageRow("GPU", usage.gpuPercent?.let { "$it%" } ?: "--")
+        ResourceUsageRow("Gsrc", usage.gpuSourceLabel)
         ResourceUsageRow("APP", "${usage.appRamMegabytes}MB")
         ResourceUsageRow("RAM", "${usage.systemRamPercent}%")
+        ResourceUsageRow("THM", usage.thermalStatusLabel)
     }
 }
 
