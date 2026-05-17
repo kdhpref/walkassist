@@ -3,15 +3,15 @@ package com.example.walkassist
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Debug
-import android.os.Process
 import java.io.File
 import kotlin.math.roundToInt
 
 data class ResourceUsageSnapshot(
-    val cpuPercent: Int = 0,
+    val cpuPercent: Float = 0f,
     val gpuPercent: Int? = null,
-    val ramPercent: Int = 0,
-    val ramMegabytes: Int = 0,
+    val appRamPercent: Float = 0f,
+    val appRamMegabytes: Int = 0,
+    val systemRamPercent: Int = 0,
 )
 
 class ResourceMonitor(
@@ -29,7 +29,7 @@ class ResourceMonitor(
 
     private val appContext = context.applicationContext
     private val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-    private val pid = Process.myPid()
+    private val cpuCoreCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     private var previousCpuTimes: CpuTimes? = null
     private var previousGpuTimes: GpuTimes? = null
     private val gpuBusyFiles = listOf(
@@ -50,19 +50,20 @@ class ResourceMonitor(
         return ResourceUsageSnapshot(
             cpuPercent = cpuPercent,
             gpuPercent = gpuPercent,
-            ramPercent = ram.first,
-            ramMegabytes = ram.second,
+            appRamPercent = ram.appPercent,
+            appRamMegabytes = ram.appMegabytes,
+            systemRamPercent = ram.systemPercent,
         )
     }
 
-    private fun sampleCpuPercent(): Int {
-        val current = readCpuTimes() ?: return 0
-        val previous = previousCpuTimes.also { previousCpuTimes = current } ?: return 0
+    private fun sampleCpuPercent(): Float {
+        val current = readCpuTimes() ?: return 0f
+        val previous = previousCpuTimes.also { previousCpuTimes = current } ?: return 0f
         val processDelta = (current.processTicks - previous.processTicks).coerceAtLeast(0L)
         val totalDelta = (current.totalTicks - previous.totalTicks).coerceAtLeast(1L)
-        return ((processDelta.toDouble() / totalDelta.toDouble()) * 100.0)
-            .roundToInt()
-            .coerceIn(0, 100)
+        return ((processDelta.toDouble() * cpuCoreCount.toDouble() / totalDelta.toDouble()) * 100.0)
+            .toFloat()
+            .coerceIn(0f, 100f)
     }
 
     private fun readCpuTimes(): CpuTimes? {
@@ -85,6 +86,8 @@ class ResourceMonitor(
     }
 
     private fun sampleGpuPercent(): Int? {
+        readGpuPercentFile()?.let { return it }
+
         readGpuBusyTimes()?.let { current ->
             val previous = previousGpuTimes.also { previousGpuTimes = current } ?: return null
             val busyDelta = (current.busy - previous.busy).coerceAtLeast(0L)
@@ -94,6 +97,10 @@ class ResourceMonitor(
                 .coerceIn(0, 100)
         }
 
+        return null
+    }
+
+    private fun readGpuPercentFile(): Int? {
         return gpuPercentFiles.firstNotNullOfOrNull { path ->
             val value = runCatching { File(path).readText().trim() }.getOrNull()
                 ?.split(Regex("\\s+"))
@@ -119,16 +126,32 @@ class ResourceMonitor(
         }
     }
 
-    private fun sampleRam(): Pair<Int, Int> {
+    private data class RamSample(
+        val appPercent: Float,
+        val appMegabytes: Int,
+        val systemPercent: Int,
+    )
+
+    private fun sampleRam(): RamSample {
         val memoryInfo = Debug.MemoryInfo()
         Debug.getMemoryInfo(memoryInfo)
         val appPssKilobytes = memoryInfo.totalPss.coerceAtLeast(0)
         val systemMemoryInfo = ActivityManager.MemoryInfo()
         activityManager.getMemoryInfo(systemMemoryInfo)
         val totalKilobytes = (systemMemoryInfo.totalMem / 1024L).coerceAtLeast(1L)
-        val percent = ((appPssKilobytes.toDouble() / totalKilobytes.toDouble()) * 100.0)
+        val appPercent = ((appPssKilobytes.toDouble() / totalKilobytes.toDouble()) * 100.0)
+            .toFloat()
+            .coerceIn(0f, 100f)
+        val systemPercent = (
+            ((systemMemoryInfo.totalMem - systemMemoryInfo.availMem).toDouble() /
+                systemMemoryInfo.totalMem.toDouble()) * 100.0
+            )
             .roundToInt()
             .coerceIn(0, 100)
-        return percent to (appPssKilobytes / 1024)
+        return RamSample(
+            appPercent = appPercent,
+            appMegabytes = appPssKilobytes / 1024,
+            systemPercent = systemPercent,
+        )
     }
 }

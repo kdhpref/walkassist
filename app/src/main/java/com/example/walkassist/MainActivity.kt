@@ -415,9 +415,10 @@ private fun ResourceUsagePanel(
             fontWeight = FontWeight.Bold,
         )
         Spacer(modifier = Modifier.height(5.dp))
-        ResourceUsageRow("CPU", "${usage.cpuPercent}%")
+        ResourceUsageRow("CPU", "${formatPercent(usage.cpuPercent)}%")
         ResourceUsageRow("GPU", usage.gpuPercent?.let { "$it%" } ?: "--")
-        ResourceUsageRow("RAM", "${usage.ramPercent}% ${usage.ramMegabytes}MB")
+        ResourceUsageRow("APP", "${usage.appRamMegabytes}MB")
+        ResourceUsageRow("RAM", "${usage.systemRamPercent}%")
     }
 }
 
@@ -679,6 +680,13 @@ private fun MeasurementOverlay(
             modifier = Modifier.fillMaxSize(),
         )
 
+        ObjectDistancePanel(
+            detections = state.objectDetections,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 124.dp, end = 14.dp),
+        )
+
         CompactWorldMapOverlay(
             state = state,
             modifier = Modifier
@@ -813,7 +821,6 @@ private fun ObjectDetectionOverlay(
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier = modifier) {
-        val boxStrokeColor = Color(0xFFFFB648)
         val labelBackground = Color(0xCC121820)
 
         detections.forEach { detection ->
@@ -827,26 +834,24 @@ private fun ObjectDetectionOverlay(
                     .offset(x = boxLeft, y = boxTop)
                     .width(boxWidth)
                     .height(boxHeight)
-                    .border(2.dp, distanceColor(detection.distanceMeters), RoundedCornerShape(8.dp)),
+                    .border(4.dp, distanceColor(detection.distanceMeters), RoundedCornerShape(8.dp)),
             ) {
-                detection.distanceMeters?.let { distance ->
-                    DistanceRail(
-                        distanceMeters = distance,
-                        isReference = detection.distanceIsReference,
-                        modifier = Modifier
-                            .align(Alignment.CenterEnd)
-                            .padding(end = 3.dp)
-                            .width(7.dp)
-                            .height(boxHeight * 0.82f),
-                    )
-                    DistanceBadge(
-                        distanceMeters = distance,
-                        isReference = detection.distanceIsReference,
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 5.dp),
-                    )
-                }
+                DistanceRail(
+                    distanceMeters = detection.distanceMeters,
+                    isReference = detection.distanceIsReference,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 3.dp)
+                        .width(8.dp)
+                        .height(boxHeight * 0.82f),
+                )
+                DistanceBadge(
+                    distanceMeters = detection.distanceMeters,
+                    isReference = detection.distanceIsReference,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 5.dp),
+                )
                 Text(
                     text = buildString {
                         append(presentableLabel(detection.label))
@@ -1020,13 +1025,73 @@ private fun DebugOverlay(
 }
 
 @Composable
+private fun ObjectDistancePanel(
+    detections: List<ObjectOverlayDetection>,
+    modifier: Modifier = Modifier,
+) {
+    if (detections.isEmpty()) return
+    Column(
+        modifier = modifier
+            .width(176.dp)
+            .background(Color(0xB8121820), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+    ) {
+        Text(
+            text = "Objects",
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(modifier = Modifier.height(5.dp))
+        detections.take(5).forEach { detection ->
+            ObjectDistanceRow(detection = detection)
+        }
+    }
+}
+
+@Composable
+private fun ObjectDistanceRow(
+    detection: ObjectOverlayDetection,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = presentableLabel(detection.label),
+            color = Color(0xFFD8E3EE),
+            fontSize = 11.sp,
+            modifier = Modifier.width(78.dp),
+        )
+        Text(
+            text = distanceText(detection.distanceMeters, detection.distanceIsReference),
+            color = distanceColor(detection.distanceMeters),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(52.dp),
+        )
+        Text(
+            text = "${(detection.confidence * 100f).toInt()}%",
+            color = Color(0xFFB7F7CE),
+            fontSize = 10.sp,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(30.dp),
+        )
+    }
+}
+
+@Composable
 private fun DistanceBadge(
-    distanceMeters: Float,
+    distanceMeters: Float?,
     isReference: Boolean,
     modifier: Modifier = Modifier,
 ) {
     Text(
-        text = "거리 ${formatMeters(distanceMeters, isReference)}",
+        text = "거리 ${distanceText(distanceMeters, isReference)}",
         color = Color.White,
         fontSize = 12.sp,
         fontWeight = FontWeight.Bold,
@@ -1039,15 +1104,13 @@ private fun DistanceBadge(
 
 @Composable
 private fun DistanceRail(
-    distanceMeters: Float,
+    distanceMeters: Float?,
     isReference: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    val fillRatio = if (isReference) {
-        0.08f
-    } else {
-        (1f - (distanceMeters / 5f)).coerceIn(0.08f, 1f)
-    }
+    val fillRatio = distanceMeters?.let {
+        if (isReference) 0.08f else (1f - (it / 5f)).coerceIn(0.08f, 1f)
+    } ?: 0.08f
     Box(
         modifier = modifier
             .background(Color(0x66121820), RoundedCornerShape(99.dp)),
@@ -1159,6 +1222,13 @@ private fun distanceColor(distanceMeters: Float?): Color {
         distance < 3f -> Color(0xFF5CBF88)
         else -> Color(0xFF7EC7FF)
     }
+}
+
+private fun distanceText(
+    distanceMeters: Float?,
+    isReference: Boolean = false,
+): String {
+    return distanceMeters?.let { formatMeters(it, isReference) } ?: "--"
 }
 
 private fun presentableLabel(label: String): String {
@@ -1318,6 +1388,14 @@ private fun formatSeconds(seconds: Float): String {
 
 private fun formatMapScore(score: Float): String {
     return "${(score.coerceIn(0f, 1f) * 100f).toInt()}"
+}
+
+private fun formatPercent(value: Float): String {
+    return if (value < 9.95f) {
+        String.format("%.1f", value)
+    } else {
+        value.toInt().coerceIn(0, 100).toString()
+    }
 }
 
 private fun formatMetersShort(distanceMeters: Float, isReference: Boolean = false): String {
