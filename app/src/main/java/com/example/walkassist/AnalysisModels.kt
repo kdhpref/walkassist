@@ -101,9 +101,16 @@ enum class SpatialFrameSource {
     VIDEO_REPLAY,
 }
 
+enum class VlmRequestMode {
+    AUTO,
+    MANUAL,
+}
+
 data class SpatialFrame(
     val bitmap: Bitmap,
     val timestampMillis: Long,
     val source: SpatialFrameSource,
     val pitchRadians: Float,
+    val arState: ArMeasurementState? = null,
+    val requestMode: VlmRequestMode = VlmRequestMode.AUTO,
 )

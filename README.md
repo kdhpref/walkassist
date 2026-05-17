@@ -10,7 +10,7 @@ Android AR walking-assistance prototype for local spatial awareness.
 - `DeepLabV3-MobileNetV3 Cityscapes` floor segmentation from `app/src/main/assets/deeplabv3_cityscapes.tflite`
 - heuristic floor segmentation fallback when the model is unavailable or throttled
 - object distance enrichment from ARCore raw depth sampled inside object regions
-- low-frequency Gemma VLM scene interpretation through ML Kit GenAI Prompt API
+- manual Gemini API VLM scene interpretation from the current camera image
 - Compose overlay that shows:
   - detected object boxes
   - ARCore depth distance
@@ -23,7 +23,7 @@ Android AR walking-assistance prototype for local spatial awareness.
 - YOLO segmentation masks are decoded as compact segment metadata; full mask-to-depth fusion is the next step
 - The Cityscapes floor model is throttled and cached because it is expensive on-device
 - Explicit Android IMU collection is not wired yet; phone pitch and motion currently come from ARCore camera pose
-- VLM receives image plus compact CV context, but full ARCore depth/local-map context is still being structured
+- VLM receives image plus compact CV context when the VLM button is pressed, but full ARCore depth/local-map context is still being structured
 
 ## Run
 
@@ -40,6 +40,21 @@ From terminal:
 cmd /c gradlew.bat assembleDebug
 cmd /c gradlew.bat installDebug
 ```
+
+## Gemini API VLM
+
+The VLM button sends the current camera image plus compact CV hints to Gemini
+and asks for a short Korean walking-scene description. The request is one-shot:
+Gemini is called only when the user presses the VLM button.
+
+Put the API key in `local.properties`:
+
+```properties
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+The key is exposed to the app through `BuildConfig.GEMINI_API_KEY`; do not put it
+in source-controlled Kotlin files.
 
 ## Next recommended work
 

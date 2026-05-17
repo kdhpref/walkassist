@@ -21,6 +21,20 @@ fun quotedBuildConfigValue(value: String): String {
     return "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 }
 
+fun adbExecutablePath(): String {
+    val sdkDir = localProperties.getProperty("sdk.dir", "")
+    val executable = if (System.getProperty("os.name").lowercase().contains("windows")) {
+        "adb.exe"
+    } else {
+        "adb"
+    }
+    return if (sdkDir.isBlank()) {
+        executable
+    } else {
+        file("$sdkDir/platform-tools/$executable").absolutePath
+    }
+}
+
 android {
     namespace = "com.example.walkassist"
     compileSdk = 35
@@ -39,6 +53,11 @@ android {
             "String",
             "TMAP_API_KEY",
             quotedBuildConfigValue(localProperty("TMAP_API_KEY")),
+        )
+        buildConfigField(
+            "String",
+            "GEMINI_API_KEY",
+            quotedBuildConfigValue(localProperty("GEMINI_API_KEY")),
         )
         vectorDrawables {
             useSupportLibrary = true
@@ -88,7 +107,6 @@ dependencies {
     implementation("com.google.ar:core:1.46.0")
     implementation("com.google.ar.sceneform.ux:sceneform-ux:1.17.1")
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
-    implementation("com.google.mlkit:genai-prompt:1.0.0-beta2")
     implementation("com.naver.maps:map-sdk:3.23.1")
     implementation("com.google.android.gms:play-services-location:21.0.1")
     implementation("com.squareup.retrofit2:retrofit:2.9.0")
@@ -96,4 +114,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:core:1.5.0")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
 }

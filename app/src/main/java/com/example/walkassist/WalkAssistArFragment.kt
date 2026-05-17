@@ -7,6 +7,7 @@ import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import android.media.Image
+import android.net.Uri
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Log
@@ -17,14 +18,22 @@ import com.google.ar.core.Coordinates2d
 import com.google.ar.core.DepthPoint
 import com.google.ar.core.Frame
 import com.google.ar.core.Plane
+import com.google.ar.core.PlaybackStatus
 import com.google.ar.core.Point
+import com.google.ar.core.RecordingConfig
+import com.google.ar.core.RecordingStatus
 import com.google.ar.core.Session
+import com.google.ar.core.Track
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
+import com.google.ar.core.exceptions.RecordingFailedException
 import com.google.ar.sceneform.ux.ArFragment
 import com.example.walkassist.ocr.OneShotOcrReader
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.nio.charset.StandardCharsets
+import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
@@ -128,15 +137,17 @@ class WalkAssistArFragment : ArFragment() {
     private val objectAnalyzer by lazy { ObjectAnalyzer(requireContext().applicationContext) }
     private val floorSegmenter by lazy { ModelFloorSegmenter(requireContext().applicationContext) }
     private val crosswalkPatternDetector by lazy { CrosswalkPatternDetector() }
-    private val vlmSceneInterpreter by lazy { AiCoreGemmaVlmSceneInterpreter(requireContext().applicationContext) }
+    private val vlmSceneInterpreter by lazy { WalkAssistVlmFactory.create(requireContext().applicationContext) }
     private val vlmInvocationPolicy = VlmInvocationPolicy()
     private var oneShotOcrReader: OneShotOcrReader? = null
     private val objectTracker = ObjectTracker()
     private val detectorExecutor = Executors.newSingleThreadExecutor()
+    private val vlmExecutor = Executors.newSingleThreadExecutor()
     private val detectionInFlight = AtomicBoolean(false)
     private val oneShotOcrRequested = AtomicBoolean(false)
     private val oneShotOcrInFlight = AtomicBoolean(false)
     private val oneShotVlmRequested = AtomicBoolean(false)
+    private val oneShotVlmInFlight = AtomicBoolean(false)
     private var lastDetectionStartedAtMs = 0L
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
     @Volatile
@@ -156,6 +167,10 @@ class WalkAssistArFragment : ArFragment() {
     private var stableDirection = "searching"
     var onOneShotOcrResult: ((String) -> Unit)? = null
     var onOneShotVlmResult: ((String) -> Unit)? = null
+    var recordReplayOnSessionStart: Boolean = false
+    var playbackDatasetUri: Uri? = null
+    private var activeRecordingDatasetUri: Uri? = null
+    private var customReplayTrackEnabled = false
 
     fun requestOneShotOcr() {
         if (oneShotOcrRequested.get() || oneShotOcrInFlight.get()) {
@@ -166,7 +181,7 @@ class WalkAssistArFragment : ArFragment() {
     }
 
     fun requestOneShotVlm() {
-        if (oneShotVlmRequested.get()) {
+        if (oneShotVlmRequested.get() || oneShotVlmInFlight.get()) {
             dispatchOneShotVlmResult("이미 앞쪽 장면을 분석 중입니다. 잠시만 기다려 주세요.")
             return
         }
@@ -177,6 +192,9 @@ class WalkAssistArFragment : ArFragment() {
         planeDiscoveryController.hide()
         planeDiscoveryController.setInstructionView(null)
         arSceneView.planeRenderer.isEnabled = false
+
+        configurePlaybackIfRequested(session)
+        configureRecordingIfRequested(session)
 
         return Config(session).apply {
             planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
@@ -197,19 +215,199 @@ class WalkAssistArFragment : ArFragment() {
         }
     }
 
+    fun stopArCoreReplayRecording() {
+        val session = arSceneView.session
+        if (session == null || session.recordingStatus != RecordingStatus.OK) {
+            ArCoreReplayController.updateMessage("진행 중인 ARCore 녹화가 없습니다.")
+            return
+        }
+        try {
+            session.stopRecording()
+            activeRecordingDatasetUri?.let { ArCoreReplayController.saveLastDataset(requireContext(), it) }
+            ArCoreReplayController.update(
+                ArCoreReplayUiState(
+                    mode = ArCoreReplayMode.LIVE,
+                    recordingStatus = session.recordingStatus.name,
+                    playbackStatus = session.playbackStatus.name,
+                    datasetUri = activeRecordingDatasetUri,
+                    message = "ARCore 데이터셋 녹화를 저장했습니다.",
+                ),
+            )
+        } catch (error: RecordingFailedException) {
+            ArCoreReplayController.update(
+                ArCoreReplayUiState(
+                    mode = ArCoreReplayMode.LIVE,
+                    recordingStatus = session.recordingStatus.name,
+                    playbackStatus = session.playbackStatus.name,
+                    datasetUri = activeRecordingDatasetUri,
+                    message = "ARCore 녹화 중지 실패: ${error.message ?: "알 수 없는 오류"}",
+                ),
+            )
+        }
+    }
+
     override fun onDestroy() {
         detectorExecutor.shutdownNow()
+        vlmExecutor.shutdownNow()
         objectAnalyzer.close()
         vlmSceneInterpreter.close()
         oneShotOcrReader?.close()
         super.onDestroy()
     }
 
+    private fun configurePlaybackIfRequested(session: Session) {
+        val datasetUri = playbackDatasetUri ?: return
+        try {
+            session.setPlaybackDatasetUri(datasetUri)
+            ArCoreReplayController.update(
+                ArCoreReplayUiState(
+                    mode = ArCoreReplayMode.PLAYBACK,
+                    recordingStatus = session.recordingStatus.name,
+                    playbackStatus = session.playbackStatus.name,
+                    datasetUri = datasetUri,
+                    message = "ARCore 데이터셋 재생을 준비했습니다.",
+                ),
+            )
+        } catch (error: Exception) {
+            ArCoreReplayController.update(
+                ArCoreReplayUiState(
+                    mode = ArCoreReplayMode.LIVE,
+                    recordingStatus = session.recordingStatus.name,
+                    playbackStatus = session.playbackStatus.name,
+                    datasetUri = datasetUri,
+                    message = "ARCore 데이터셋 재생 준비 실패: ${error.message ?: "알 수 없는 오류"}",
+                ),
+            )
+        }
+    }
+
+    private fun configureRecordingIfRequested(session: Session) {
+        if (!recordReplayOnSessionStart || session.recordingStatus == RecordingStatus.OK) return
+
+        val datasetUri = ArCoreReplayController.createDatasetUri(requireContext())
+        activeRecordingDatasetUri = datasetUri
+        val recordingConfig = RecordingConfig(session)
+            .setMp4DatasetUri(datasetUri)
+            .setAutoStopOnPause(true)
+
+        runCatching {
+            val metadata = "WalkAssist ARCore replay metadata track v1"
+                .toByteArray(StandardCharsets.UTF_8)
+            val track = Track(session)
+                .setId(REPLAY_METADATA_TRACK_ID)
+                .setMimeType("application/vnd.walkassist.replay+json")
+                .setMetadata(ByteBuffer.wrap(metadata))
+            recordingConfig.addTrack(track)
+            customReplayTrackEnabled = true
+        }.onFailure {
+            customReplayTrackEnabled = false
+            Log.w(TAG, "Custom ARCore replay metadata track is unavailable", it)
+        }
+
+        try {
+            session.startRecording(recordingConfig)
+            ArCoreReplayController.saveLastDataset(requireContext(), datasetUri)
+            ArCoreReplayController.update(
+                ArCoreReplayUiState(
+                    mode = ArCoreReplayMode.RECORDING,
+                    recordingStatus = session.recordingStatus.name,
+                    playbackStatus = session.playbackStatus.name,
+                    datasetUri = datasetUri,
+                    message = "ARCore 데이터셋 녹화를 시작했습니다.",
+                ),
+            )
+        } catch (error: Exception) {
+            activeRecordingDatasetUri = null
+            customReplayTrackEnabled = false
+            ArCoreReplayController.update(
+                ArCoreReplayUiState(
+                    mode = ArCoreReplayMode.LIVE,
+                    recordingStatus = session.recordingStatus.name,
+                    playbackStatus = session.playbackStatus.name,
+                    datasetUri = datasetUri,
+                    message = "ARCore 녹화 시작 실패: ${error.message ?: "알 수 없는 오류"}",
+                ),
+            )
+        }
+    }
+
+    private fun updateReplayRuntimeState(frame: Frame) {
+        val session = arSceneView.session ?: return
+        val recordingStatus = session.recordingStatus
+        val playbackStatus = session.playbackStatus
+        val isRecording = recordingStatus == RecordingStatus.OK
+        val isPlayback = playbackStatus == PlaybackStatus.OK || playbackStatus == PlaybackStatus.FINISHED
+        if (!isRecording && !isPlayback && ArCoreReplayController.currentState().mode == ArCoreReplayMode.LIVE) return
+
+        val datasetUri = activeRecordingDatasetUri ?: playbackDatasetUri
+        val playbackMetadataCount = if (playbackStatus == PlaybackStatus.OK) {
+            runCatching { frame.getUpdatedTrackData(REPLAY_METADATA_TRACK_ID).size }.getOrDefault(0)
+        } else {
+            0
+        }
+        val message = when {
+            isRecording -> "ARCore 데이터셋 녹화 중입니다."
+            playbackStatus == PlaybackStatus.OK && playbackMetadataCount > 0 ->
+                "ARCore 데이터셋 재생 중입니다. 앱 메타데이터 ${playbackMetadataCount}건을 읽었습니다."
+            playbackStatus == PlaybackStatus.OK -> "ARCore 데이터셋 재생 중입니다."
+            playbackStatus == PlaybackStatus.FINISHED -> "ARCore 데이터셋 재생이 끝났습니다."
+            playbackStatus == PlaybackStatus.IO_ERROR -> "ARCore 데이터셋 재생 중 I/O 오류가 발생했습니다."
+            else -> ArCoreReplayController.currentState().message
+        }
+
+        ArCoreReplayController.update(
+            ArCoreReplayUiState(
+                mode = when {
+                    isRecording -> ArCoreReplayMode.RECORDING
+                    isPlayback -> ArCoreReplayMode.PLAYBACK
+                    else -> ArCoreReplayMode.LIVE
+                },
+                recordingStatus = recordingStatus.name,
+                playbackStatus = playbackStatus.name,
+                datasetUri = datasetUri,
+                message = message,
+            ),
+        )
+    }
+
+    private fun recordReplayAppMetadata(frame: Frame) {
+        if (!customReplayTrackEnabled) return
+        val session = arSceneView.session ?: return
+        if (session.recordingStatus != RecordingStatus.OK) return
+
+        val camera = frame.camera
+        if (camera.trackingState != TrackingState.TRACKING) return
+        val pose = camera.displayOrientedPose
+        val metadata = buildString {
+            append('{')
+            append("\"timestampNanos\":").append(frame.timestamp).append(',')
+            append("\"tracking\":\"").append(camera.trackingState.name).append("\",")
+            append("\"pose\":[")
+            append(pose.tx()).append(',').append(pose.ty()).append(',').append(pose.tz())
+            append("]")
+            append('}')
+        }.toByteArray(StandardCharsets.UTF_8)
+
+        runCatching {
+            frame.recordTrackData(REPLAY_METADATA_TRACK_ID, ByteBuffer.wrap(metadata))
+        }.onFailure {
+            customReplayTrackEnabled = false
+            Log.w(TAG, "Failed to record ARCore replay metadata", it)
+        }
+    }
+
     private fun publishFrameState() {
         val frame = arSceneView.arFrame ?: return
+        val debugFlags = WalkAssistSettings.debugPipelineFlags(requireContext())
         val camera = frame.camera
-        scheduleVisionAnalysis(frame)
-        val trackedPlanes = arSceneView.session?.getAllTrackables(Plane::class.java).orEmpty()
+        updateReplayRuntimeState(frame)
+        recordReplayAppMetadata(frame)
+        scheduleVisionAnalysis(frame, debugFlags)
+        val trackedPlanes = if (debugFlags.arCoreHitTestEnabled) {
+            arSceneView.session?.getAllTrackables(Plane::class.java).orEmpty()
+        } else {
+            emptyList()
+        }
         val horizontalPlaneCount = trackedPlanes.count {
             it.trackingState == TrackingState.TRACKING && it.type == Plane.Type.HORIZONTAL_UPWARD_FACING
         }
@@ -229,13 +427,21 @@ class WalkAssistArFragment : ArFragment() {
                     guidanceLabel = "Scan the floor and wall slowly.",
                     statusLabel = "Move the phone left and right over a textured floor.",
                     statusLevel = ArStatusLevel.INFO,
-                    objectDetections = lastObjectDetections,
+                    objectDetections = if (debugFlags.yoloEnabled) lastObjectDetections else emptyList(),
                     planeDetections = emptyList(),
                     planePolygons = emptyList(),
                     worldMapRangeMeters = worldLocalMap.rangeMeters(),
                     worldMapCellSizeMeters = worldLocalMap.cellSizeMeters(),
-                    worldMapObservationCount = worldLocalMap.totalObservationCount(),
-                    worldMapConfidenceScore = worldLocalMap.averageConfidenceScore(),
+                    worldMapObservationCount = if (debugFlags.localMapEnabled) {
+                        worldLocalMap.totalObservationCount()
+                    } else {
+                        0
+                    },
+                    worldMapConfidenceScore = if (debugFlags.localMapEnabled) {
+                        worldLocalMap.averageConfidenceScore()
+                    } else {
+                        0
+                    },
                     note = "ARCore needs visible feature points and steady motion.",
                 ),
             )
@@ -243,11 +449,11 @@ class WalkAssistArFragment : ArFragment() {
         }
 
         val pitchDownDegrees = computePitchDownDegrees(frame)
-        val corridorHits = sampleWorldCorridor(frame)
-        val floorMaskState = currentFloorMaskState(frame.timestamp)
-        val crosswalkState = currentCrosswalkState(frame.timestamp)
-        val vlmVisionState = currentVlmVisionState(frame.timestamp)
-        val rawDepthHits = sampleRawDepthCorridor(frame)
+        val corridorHits = if (debugFlags.arCoreHitTestEnabled) sampleWorldCorridor(frame) else emptyList()
+        val floorMaskState = if (debugFlags.floorSegmentationEnabled) currentFloorMaskState(frame.timestamp) else null
+        val crosswalkState = if (debugFlags.crosswalkEnabled) currentCrosswalkState(frame.timestamp) else null
+        val vlmVisionState = if (debugFlags.vlmEnabled) currentVlmVisionState(frame.timestamp) else null
+        val rawDepthHits = if (debugFlags.rawDepthEnabled) sampleRawDepthCorridor(frame) else emptyList()
         val cameraPose = frame.camera.displayOrientedPose
         val mapObservations = (corridorHits + rawDepthHits).map {
             WorldMapObservation(
@@ -261,22 +467,34 @@ class WalkAssistArFragment : ArFragment() {
                 confidence = it.observationConfidence,
             )
         }
-        worldLocalMap.update(
-            cameraWorldX = cameraPose.tx(),
-            cameraWorldZ = cameraPose.tz(),
-            observations = mapObservations,
-        )
-        val worldMapSnapshot = worldLocalMap.snapshot(
-            cameraWorldX = cameraPose.tx(),
-            cameraWorldZ = cameraPose.tz(),
-            cameraXAxisX = cameraPose.xAxis[0],
-            cameraXAxisZ = cameraPose.xAxis[2],
-            cameraZAxisX = cameraPose.zAxis[0],
-            cameraZAxisZ = cameraPose.zAxis[2],
-        )
+        val worldMapSnapshot = if (debugFlags.localMapEnabled) {
+            worldLocalMap.update(
+                cameraWorldX = cameraPose.tx(),
+                cameraWorldZ = cameraPose.tz(),
+                observations = mapObservations,
+            )
+            worldLocalMap.snapshot(
+                cameraWorldX = cameraPose.tx(),
+                cameraWorldZ = cameraPose.tz(),
+                cameraXAxisX = cameraPose.xAxis[0],
+                cameraXAxisZ = cameraPose.xAxis[2],
+                cameraZAxisX = cameraPose.zAxis[0],
+                cameraZAxisZ = cameraPose.zAxis[2],
+            )
+        } else {
+            emptyList()
+        }
         val worldMapLaneMetrics = evaluateWorldMapLanes(worldMapSnapshot)
         val overlayDetections = updateObjectMotionTags(
-            detections = enrichObjectDetections(frame, lastObjectDetections),
+            detections = if (debugFlags.yoloEnabled) {
+                enrichObjectDetections(
+                    frame = frame,
+                    detections = lastObjectDetections,
+                    rawDepthEnabled = debugFlags.rawDepthEnabled,
+                )
+            } else {
+                emptyList()
+            },
             timestampNanos = frame.timestamp,
             worldMapLaneMetrics = worldMapLaneMetrics,
         )
@@ -436,10 +654,14 @@ class WalkAssistArFragment : ArFragment() {
                 worldMapCells = worldMapSnapshot,
                 worldMapRangeMeters = worldLocalMap.rangeMeters(),
                 worldMapCellSizeMeters = worldLocalMap.cellSizeMeters(),
-                worldMapKnownCells = worldLocalMap.knownCellCount(),
-                worldMapOccupiedCells = worldLocalMap.occupiedCellCount(),
-                worldMapObservationCount = worldLocalMap.totalObservationCount(),
-                worldMapConfidenceScore = worldLocalMap.averageConfidenceScore(),
+                worldMapKnownCells = if (debugFlags.localMapEnabled) worldLocalMap.knownCellCount() else 0,
+                worldMapOccupiedCells = if (debugFlags.localMapEnabled) worldLocalMap.occupiedCellCount() else 0,
+                worldMapObservationCount = if (debugFlags.localMapEnabled) {
+                    worldLocalMap.totalObservationCount()
+                } else {
+                    0
+                },
+                worldMapConfidenceScore = if (debugFlags.localMapEnabled) worldLocalMap.averageConfidenceScore() else 0,
                 worldMapLeftOpenScore = laneOpennessScore(
                     freeSpaceMeters = worldMapLaneMetrics.leftFreeSpaceMeters,
                     occupancyRatio = worldMapLaneMetrics.leftOccupancyRatio,
@@ -469,11 +691,23 @@ class WalkAssistArFragment : ArFragment() {
         )
     }
 
-    private fun scheduleVisionAnalysis(frame: Frame) {
+    private fun scheduleVisionAnalysis(
+        frame: Frame,
+        debugFlags: DebugPipelineFlags,
+    ) {
         if (detectionInFlight.get()) return
 
         val ocrRequested = oneShotOcrRequested.get()
         val vlmRequested = oneShotVlmRequested.get()
+        val backgroundVisionEnabled = debugFlags.yoloEnabled ||
+            debugFlags.floorSegmentationEnabled ||
+            debugFlags.crosswalkEnabled
+        if (!backgroundVisionEnabled && !ocrRequested && !vlmRequested) {
+            lastObjectDetections = emptyList()
+            lastFloorMaskState = null
+            lastCrosswalkState = null
+            return
+        }
         val now = SystemClock.elapsedRealtime()
         if (!ocrRequested && !vlmRequested && now - lastDetectionStartedAtMs < 450L) return
 
@@ -488,8 +722,8 @@ class WalkAssistArFragment : ArFragment() {
         val localFloorSegmenter = floorSegmenter
         val localObjectAnalyzer = objectAnalyzer
         val localCrosswalkDetector = crosswalkPatternDetector
-        val localVlmInterpreter = vlmSceneInterpreter
         val pitchRadians = Math.toRadians(computePitchDownDegrees(frame).toDouble()).toFloat()
+        val arStateSnapshot = ArMeasurementBridge.state.value
 
         lastDetectionStartedAtMs = now
         detectionInFlight.set(true)
@@ -497,22 +731,49 @@ class WalkAssistArFragment : ArFragment() {
             var shouldRunOcr = false
             var ocrStarted = false
             var shouldRunVlm = false
+            var vlmStarted = false
             try {
                 val bitmap = image.toUprightBitmap(rotationDegrees)
                 image.close()
                 shouldRunOcr = oneShotOcrRequested.getAndSet(false)
                 shouldRunVlm = oneShotVlmRequested.getAndSet(false)
+                if (shouldRunVlm && debugFlags.vlmEnabled) {
+                    val vlmFrame = SpatialFrame(
+                        bitmap = bitmap,
+                        timestampMillis = frame.timestamp / 1_000_000L,
+                        source = SpatialFrameSource.LIVE_CAMERA,
+                        pitchRadians = pitchRadians,
+                        arState = arStateSnapshot,
+                        requestMode = VlmRequestMode.MANUAL,
+                    )
+                    startBackgroundVlmCaption(
+                        bitmap = bitmap,
+                        spatialFrame = vlmFrame,
+                        primaryAnalysis = EMPTY_FRAME_ANALYSIS,
+                        crosswalk = EMPTY_CROSSWALK_RESULT,
+                        timestampNanos = frame.timestamp,
+                    )
+                    vlmStarted = true
+                } else if (shouldRunVlm) {
+                    dispatchOneShotVlmResult("디버그 설정에서 VLM 파이프라인이 꺼져 있습니다.")
+                }
                 if (shouldRunOcr) {
                     ocrStarted = startOneShotOcr(bitmap)
                 }
-                val floorSegmentation = localFloorSegmenter.segment(bitmap)
-                lastFloorMaskState = FloorMaskState(
-                    segmentation = floorSegmentation,
-                    imageWidth = bitmap.width,
-                    imageHeight = bitmap.height,
-                    timestampNanos = frame.timestamp,
-                )
-                val detectedObjects = if (localObjectAnalyzer.isReady()) {
+                val floorSegmentation = if (debugFlags.floorSegmentationEnabled) {
+                    localFloorSegmenter.segment(bitmap)
+                } else {
+                    null
+                }
+                lastFloorMaskState = floorSegmentation?.let {
+                    FloorMaskState(
+                        segmentation = it,
+                        imageWidth = bitmap.width,
+                        imageHeight = bitmap.height,
+                        timestampNanos = frame.timestamp,
+                    )
+                }
+                val detectedObjects = if (debugFlags.yoloEnabled && localObjectAnalyzer.isReady()) {
                     localObjectAnalyzer.detect(bitmap)
                 } else {
                     emptyList()
@@ -520,14 +781,18 @@ class WalkAssistArFragment : ArFragment() {
                 val yoloCrosswalkConfidence = detectedObjects
                     .filter { it.label.equals("crosswalk", ignoreCase = true) }
                     .maxOfOrNull { it.confidence } ?: 0f
-                lastCrosswalkState = CrosswalkVisionState(
-                    result = localCrosswalkDetector.detect(
-                        bitmap = bitmap,
-                        floorSegmentation = floorSegmentation,
-                        yoloConfidence = yoloCrosswalkConfidence,
-                    ),
-                    timestampNanos = frame.timestamp,
-                )
+                lastCrosswalkState = if (debugFlags.crosswalkEnabled) {
+                    CrosswalkVisionState(
+                        result = localCrosswalkDetector.detect(
+                            bitmap = bitmap,
+                            floorSegmentation = floorSegmentation,
+                            yoloConfidence = yoloCrosswalkConfidence,
+                        ),
+                        timestampNanos = frame.timestamp,
+                    )
+                } else {
+                    null
+                }
                 val crosswalk = lastCrosswalkState?.result ?: CrosswalkPatternResult(
                     detected = false,
                     score = 0f,
@@ -568,38 +833,17 @@ class WalkAssistArFragment : ArFragment() {
                     timestampMillis = frame.timestamp / 1_000_000L,
                     source = SpatialFrameSource.LIVE_CAMERA,
                     pitchRadians = pitchRadians,
+                    arState = arStateSnapshot,
+                    requestMode = if (shouldRunVlm) VlmRequestMode.MANUAL else VlmRequestMode.AUTO,
                 )
-                if (shouldRunVlm || vlmInvocationPolicy.shouldInvoke(spatialFrame, primaryAnalysis)) {
-                    val vlmStartedAtMs = SystemClock.elapsedRealtime()
-                    Log.d(TAG, "VLM invoke manual=$shouldRunVlm timestampMs=${spatialFrame.timestampMillis}")
-                    val interpretation = localVlmInterpreter.interpret(
-                        frame = spatialFrame,
+                if (shouldRunVlm && debugFlags.vlmEnabled && !vlmStarted) {
+                    startBackgroundVlmCaption(
+                        bitmap = bitmap,
+                        spatialFrame = spatialFrame,
                         primaryAnalysis = primaryAnalysis,
                         crosswalk = crosswalk,
+                        timestampNanos = frame.timestamp,
                     )
-                    Log.d(
-                        TAG,
-                        "VLM result manual=$shouldRunVlm elapsedMs=${SystemClock.elapsedRealtime() - vlmStartedAtMs} risk=${interpretation?.risk}",
-                    )
-                    if (interpretation != null) {
-                        lastVlmVisionState = VlmVisionState(
-                            interpretation = interpretation,
-                            timestampNanos = frame.timestamp,
-                        )
-                        if (shouldRunVlm) {
-                            dispatchOneShotVlmResult(
-                                VlmWalkingAnnouncementFormatter.build(
-                                    interpretation = interpretation,
-                                    primaryAnalysis = primaryAnalysis,
-                                    crosswalk = crosswalk,
-                                ),
-                            )
-                        }
-                    } else if (shouldRunVlm) {
-                        dispatchOneShotVlmResult("장면 분석 결과를 받지 못했습니다. 잠시 멈추고 주변을 직접 확인하세요.")
-                    }
-                } else if (shouldRunVlm) {
-                    dispatchOneShotVlmResult("장면 분석 결과를 받지 못했습니다. 잠시 멈추고 주변을 직접 확인하세요.")
                 }
                 val prioritizedDetections = trackedDetections
                     .sortedWith(
@@ -633,7 +877,8 @@ class WalkAssistArFragment : ArFragment() {
                 runCatching { image.close() }
                 if (shouldRunVlm) {
                     oneShotVlmRequested.set(false)
-                    dispatchOneShotVlmResult("장면 분석에 실패했습니다. 잠시 멈추고 주변을 직접 확인하세요.")
+                    oneShotVlmInFlight.set(false)
+                    dispatchOneShotVlmResult("장면 분석에 실패했습니다. 잠시 멈춰 주세요.")
                 }
                 if (shouldRunOcr && !ocrStarted) {
                     oneShotOcrInFlight.set(false)
@@ -671,6 +916,54 @@ class WalkAssistArFragment : ArFragment() {
     private fun dispatchOneShotOcrResult(message: String) {
         activity?.runOnUiThread {
             onOneShotOcrResult?.invoke(message)
+        }
+    }
+
+    private fun startBackgroundVlmCaption(
+        bitmap: Bitmap,
+        spatialFrame: SpatialFrame,
+        primaryAnalysis: FrameAnalysis,
+        crosswalk: CrosswalkPatternResult,
+        timestampNanos: Long,
+    ) {
+        if (!oneShotVlmInFlight.compareAndSet(false, true)) {
+            return
+        }
+
+        val vlmBitmap = try {
+            bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        } catch (_: Exception) {
+            oneShotVlmInFlight.set(false)
+            return
+        }
+        val localVlmInterpreter = vlmSceneInterpreter
+        val modelFrame = spatialFrame.copy(bitmap = vlmBitmap)
+        vlmExecutor.execute {
+            val vlmStartedAtMs = SystemClock.elapsedRealtime()
+            try {
+                Log.d(TAG, "VLM invoke manual=true timestampMs=${modelFrame.timestampMillis}")
+                val interpretation = localVlmInterpreter.interpret(
+                    frame = modelFrame,
+                    primaryAnalysis = primaryAnalysis,
+                    crosswalk = crosswalk,
+                )
+                Log.d(
+                    TAG,
+                    "VLM result manual=true elapsedMs=${SystemClock.elapsedRealtime() - vlmStartedAtMs} risk=${interpretation?.risk}",
+                )
+                if (interpretation != null) {
+                    lastVlmVisionState = VlmVisionState(
+                        interpretation = interpretation,
+                        timestampNanos = timestampNanos,
+                    )
+                    dispatchOneShotVlmResult(interpretation.pathSummary)
+                }
+            } catch (error: Exception) {
+                Log.w(TAG, "Background VLM caption failed", error)
+            } finally {
+                oneShotVlmInFlight.set(false)
+                vlmBitmap.recycle()
+            }
         }
     }
 
@@ -910,8 +1203,12 @@ class WalkAssistArFragment : ArFragment() {
     private fun enrichObjectDetections(
         frame: Frame,
         detections: List<ObjectOverlayDetection>,
+        rawDepthEnabled: Boolean,
     ): List<ObjectOverlayDetection> {
         if (detections.isEmpty()) return emptyList()
+        if (!rawDepthEnabled) {
+            return detections
+        }
 
         return try {
             frame.acquireRawDepthImage16Bits().use { rawDepthImage ->
@@ -1820,8 +2117,8 @@ class WalkAssistArFragment : ArFragment() {
             return "전방 장애물을 주의하세요."
         }
         return when (suggestedDirection) {
-            "blocked" -> "전방 공간을 다시 확인해 주세요."
-            else -> "전방을 확인해 주세요."
+            "blocked" -> "전방 공간이 좁아 보입니다."
+            else -> "전방 공간을 인식 중입니다."
         }
     }
 
@@ -1853,83 +2150,6 @@ class WalkAssistArFragment : ArFragment() {
         }
     }
 
-    private fun buildOneShotVlmWalkingAnnouncement(
-        interpretation: VlmSceneInterpretation,
-        primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
-    ): String {
-        val action = when (interpretation.suggestedAction) {
-            VlmSuggestedAction.PROCEED -> "천천히 직진해도 됩니다."
-            VlmSuggestedAction.SLOW_DOWN -> "속도를 줄이고 조심해서 이동하세요."
-            VlmSuggestedAction.VEER_LEFT -> "왼쪽으로 살짝 피해서 이동하세요."
-            VlmSuggestedAction.VEER_RIGHT -> "오른쪽으로 살짝 피해서 이동하세요."
-            VlmSuggestedAction.STOP -> "앞이 위험합니다. 잠시 멈추세요."
-            VlmSuggestedAction.UNKNOWN -> when (interpretation.risk) {
-                VlmWalkingRisk.BLOCKED -> "앞이 막혀 있을 수 있습니다. 잠시 멈추세요."
-                VlmWalkingRisk.CAUTION -> "주의가 필요합니다. 천천히 확인하며 이동하세요."
-                VlmWalkingRisk.CLEAR -> "현재 보이는 길은 대체로 이동 가능합니다."
-                VlmWalkingRisk.UNKNOWN -> "장면 판단이 불확실합니다. 주변을 직접 확인하세요."
-            }
-        }
-        val riskPrefix = when (interpretation.risk) {
-            VlmWalkingRisk.BLOCKED -> "이동이 어려워 보입니다."
-            VlmWalkingRisk.CAUTION -> "주의가 필요합니다."
-            VlmWalkingRisk.CLEAR -> "앞쪽 경로가 비교적 열려 있습니다."
-            VlmWalkingRisk.UNKNOWN -> "앞쪽 장면을 확실히 판단하기 어렵습니다."
-        }
-        val summary = interpretation.pathSummary
-            .replace("VLM stub:", "")
-            .trim()
-            .takeIf { it.isNotBlank() }
-        val evidence = interpretation.evidence
-            .filterNot { it.startsWith("aicore=", ignoreCase = true) }
-            .map { it.replace('_', ' ').trim() }
-            .filter { it.isNotBlank() }
-            .take(3)
-        val detectedObjects = primaryAnalysis.detections
-            .map { presentableVlmObjectLabel(it.label) }
-            .distinct()
-            .take(3)
-        return buildString {
-            append(riskPrefix)
-            append(' ')
-            append(action)
-            summary?.let {
-                append(" 이유는 ")
-                append(it)
-                append('.')
-            }
-            val cues = when {
-                evidence.isNotEmpty() -> evidence
-                detectedObjects.isNotEmpty() -> detectedObjects.map { "$it 감지" }
-                crosswalk.detected -> listOf("횡단보도 패턴 감지")
-                else -> emptyList()
-            }
-            if (cues.isNotEmpty()) {
-                append(" 확인된 단서는 ")
-                append(cues.joinToString(", "))
-                append("입니다.")
-            }
-        }
-    }
-
-    private fun presentableVlmObjectLabel(label: String): String {
-        return when (label.lowercase()) {
-            "person" -> "사람"
-            "bicycle" -> "자전거"
-            "car" -> "자동차"
-            "motorcycle" -> "오토바이"
-            "bus" -> "버스"
-            "truck" -> "트럭"
-            "chair" -> "의자"
-            "bench" -> "벤치"
-            "traffic light" -> "신호등"
-            "stop sign" -> "표지판"
-            "crosswalk" -> "횡단보도"
-            else -> label
-        }
-    }
-
     private fun distanceMeters(
         ax: Float,
         ay: Float,
@@ -1946,5 +2166,20 @@ class WalkAssistArFragment : ArFragment() {
 
     companion object {
         private const val TAG = "WalkAssistVlm"
+        private val EMPTY_FRAME_ANALYSIS = FrameAnalysis(
+            detections = emptyList(),
+            nearestObstacle = null,
+            floorSegmentation = null,
+            pathMetrics = null,
+        )
+        private val EMPTY_CROSSWALK_RESULT = CrosswalkPatternResult(
+            detected = false,
+            score = 0f,
+            stripeCount = 0,
+            yoloConfidence = 0f,
+            modeLabel = "unavailable",
+        )
+        private val REPLAY_METADATA_TRACK_ID: UUID =
+            UUID.fromString("7f5ee9f8-52b9-4e43-9c2c-89bb5f927af4")
     }
 }

@@ -1,12 +1,14 @@
-package com.example.walkassist
+﻿package com.example.walkassist
 
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.background
@@ -31,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,6 +48,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.activity.viewModels
@@ -63,7 +67,9 @@ import com.example.walkassist.feedback.engine.FeedbackViewModel
 import com.example.walkassist.feedback.runtime.FeedbackManager
 import com.example.walkassist.feedback.ui.FeedbackOverlayCard
 import com.example.walkassist.map.MapNavigationActivity
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.min
 
@@ -77,6 +83,12 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         feedbackManager = FeedbackManager(this)
+        if (!intent.getBooleanExtra(ArCoreReplayController.EXTRA_RECORD_ON_START, false) &&
+            intent.getStringExtra(ArCoreReplayController.EXTRA_PLAYBACK_DATASET_URI).isNullOrBlank()
+        ) {
+            ArCoreReplayController.reset()
+        }
+        prepareVlmModelAtStartup()
         bindArStateToFeedback()
 
         if (!hasCameraPermission()) {
@@ -113,10 +125,7 @@ class MainActivity : AppCompatActivity() {
                         feedbackState = feedbackState,
                         onOcrClick = ::requestOneShotOcr,
                         onVlmClick = ::requestOneShotVlm,
-                        onReplayTestClick = {
-                            startActivity(Intent(this@MainActivity, SpatialReplayTestActivity::class.java))
-                            finish()
-                        },
+                        onStopReplayRecording = ::stopArCoreReplayRecording,
                     )
                 }
             }
@@ -140,6 +149,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureArFragment(fragment: WalkAssistArFragment) {
         arFragment = fragment
+        fragment.recordReplayOnSessionStart =
+            intent.getBooleanExtra(ArCoreReplayController.EXTRA_RECORD_ON_START, false)
+        fragment.playbackDatasetUri = intent
+            .getStringExtra(ArCoreReplayController.EXTRA_PLAYBACK_DATASET_URI)
+            ?.takeIf { it.isNotBlank() }
+            ?.let(android.net.Uri::parse)
         fragment.onOneShotOcrResult = { message ->
             feedbackManager.provideFeedback(
                 message = message,
@@ -151,6 +166,43 @@ class MainActivity : AppCompatActivity() {
                 message = message,
                 level = FeedbackAlertLevel.CAUTION,
             )
+        }
+    }
+
+    private fun prepareVlmModelAtStartup() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val status = runCatching {
+                GeminiVlmSceneInterpreter().prepareForUse()
+            }.onFailure {
+                Log.w(TAG, "VLM startup preparation failed", it)
+            }.getOrElse {
+                VlmModelPreparationStatus(
+                    modelName = "gemini-2.5-flash-lite",
+                    statusLabel = "unknown",
+                    downloadState = "remote_api",
+                    isAvailable = false,
+                    isFallbackLikely = true,
+                    explanation = "장면 분석 모델 상태를 확인하지 못했습니다.",
+                )
+            }
+
+            Log.i(
+                TAG,
+                "VLM startup preparation model=${status.modelName} status=${status.statusLabel} " +
+                    "download=${status.downloadState ?: "none"} available=${status.isAvailable}",
+            )
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    this@MainActivity,
+                    if (status.isAvailable) {
+                        "Gemini VLM 준비 완료: ${status.modelName}"
+                    } else {
+                        "Gemini VLM ${status.statusLabel}. ${status.explanation}"
+                    },
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
         }
     }
 
@@ -171,6 +223,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestOneShotVlm() {
+        if (!WalkAssistSettings.debugPipelineFlags(this).vlmEnabled) {
+            feedbackManager.provideFeedback(
+                message = "디버그 설정에서 VLM 파이프라인이 꺼져 있습니다.",
+                level = FeedbackAlertLevel.CAUTION,
+            )
+            return
+        }
+
         val fragment = arFragment
             ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
                 ?.also(::configureArFragment)
@@ -184,6 +244,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         fragment.requestOneShotVlm()
+    }
+
+    private fun stopArCoreReplayRecording() {
+        val fragment = arFragment
+            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.also(::configureArFragment)
+        fragment?.stopArCoreReplayRecording()
     }
 
     private fun bindArStateToFeedback() {
@@ -223,6 +290,10 @@ class MainActivity : AppCompatActivity() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
     }
+
+    companion object {
+        private const val TAG = "WalkAssistMain"
+    }
 }
 
 @Composable
@@ -231,12 +302,26 @@ private fun WalkAssistRootOverlay(
     feedbackState: FeedbackUiState,
     onOcrClick: () -> Unit,
     onVlmClick: () -> Unit,
-    onReplayTestClick: () -> Unit,
+    onStopReplayRecording: () -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
+    var replayState by remember { mutableStateOf(ArCoreReplayController.currentState()) }
     val context = LocalContext.current
+    var debugFlags by remember { mutableStateOf(WalkAssistSettings.debugPipelineFlags(context)) }
+    val updateDebugFlags: (DebugPipelineFlags) -> Unit = { nextFlags ->
+        debugFlags = nextFlags
+        WalkAssistSettings.setDebugPipelineFlags(context, nextFlags)
+    }
+    DisposableEffect(Unit) {
+        val listener: (ArCoreReplayUiState) -> Unit = { replayState = it }
+        ArCoreReplayController.addListener(listener)
+        onDispose { ArCoreReplayController.removeListener(listener) }
+    }
     val openMapNavigation = {
         context.startActivity(Intent(context, MapNavigationActivity::class.java))
+    }
+    val openSettings = {
+        context.startActivity(Intent(context, GuideSettingsActivity::class.java))
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -244,12 +329,11 @@ private fun WalkAssistRootOverlay(
             MeasurementOverlay(
                 state = state,
                 feedbackState = feedbackState,
+                debugFlags = debugFlags,
+                onDebugFlagsChanged = updateDebugFlags,
             )
             CameraUiControls(
                 onGuideClick = { cameraUiVisible = false },
-                onSettingsClick = {
-                    context.startActivity(Intent(context, GuideSettingsActivity::class.java))
-                },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 14.dp, bottom = 150.dp),
@@ -259,19 +343,24 @@ private fun WalkAssistRootOverlay(
                 arState = state,
                 feedbackState = feedbackState,
                 onCameraClick = { cameraUiVisible = true },
-                onSettingsClick = {
-                    context.startActivity(Intent(context, GuideSettingsActivity::class.java))
-                },
-                onReplayTestClick = onReplayTestClick,
+                onMapClick = openMapNavigation,
             )
         }
 
         GuideActionChip(
-            text = "길찾기",
-            onClick = openMapNavigation,
+            text = "설정",
+            onClick = openSettings,
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(top = 14.dp, end = 14.dp),
+                .padding(top = 14.dp, end = 6.dp),
+        )
+
+        ArCoreReplayStatusPanel(
+            state = replayState,
+            onStopRecording = onStopReplayRecording,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(top = 14.dp, start = 14.dp),
         )
 
         GuideActionChip(
@@ -292,12 +381,60 @@ private fun WalkAssistRootOverlay(
 }
 
 @Composable
+private fun ArCoreReplayStatusPanel(
+    state: ArCoreReplayUiState,
+    onStopRecording: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (state.mode == ArCoreReplayMode.LIVE && state.message.isBlank()) return
+
+    Column(
+        modifier = modifier
+            .width(230.dp)
+            .background(Color(0xB8121820), RoundedCornerShape(16.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = when (state.mode) {
+                ArCoreReplayMode.RECORDING -> "ARCore 녹화"
+                ArCoreReplayMode.PLAYBACK -> "ARCore 재생"
+                ArCoreReplayMode.LIVE -> "ARCore 리플레이"
+            },
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        if (state.message.isNotBlank()) {
+            Spacer(modifier = Modifier.height(5.dp))
+            Text(
+                text = state.message,
+                color = Color(0xFFD8E3EE),
+                fontSize = 12.sp,
+            )
+        }
+        Spacer(modifier = Modifier.height(5.dp))
+        Text(
+            text = "REC ${state.recordingStatus} / PLAY ${state.playbackStatus}",
+            color = Color(0xFFB7F7CE),
+            fontSize = 11.sp,
+        )
+        if (state.mode == ArCoreReplayMode.RECORDING) {
+            Spacer(modifier = Modifier.height(8.dp))
+            GuideActionChip(
+                text = "녹화 중지",
+                onClick = onStopRecording,
+                modifier = Modifier.width(104.dp),
+            )
+        }
+    }
+}
+
+@Composable
 private fun GuideStatusOverlay(
     arState: ArMeasurementState,
     feedbackState: FeedbackUiState,
     onCameraClick: () -> Unit,
-    onSettingsClick: () -> Unit,
-    onReplayTestClick: () -> Unit,
+    onMapClick: () -> Unit,
 ) {
     val palette = guidePalette(feedbackState.alertLevel, feedbackState.sensorStatus)
     Box(
@@ -348,29 +485,20 @@ private fun GuideStatusOverlay(
         )
 
         Column(
-            modifier = Modifier.align(Alignment.BottomEnd),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 6.dp, bottom = 18.dp),
             horizontalAlignment = Alignment.End,
         ) {
-            Text(
-                text = guideSensorStatus(feedbackState.sensorStatus),
-                color = palette.foreground.copy(alpha = 0.82f),
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
+            GuideActionChip(
+                text = "길찾기",
+                onClick = onMapClick,
             )
             Spacer(modifier = Modifier.height(10.dp))
             GuideActionChip(
                 text = "카메라 보기",
                 onClick = onCameraClick,
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            GuideActionChip(
-                text = "설정",
-                onClick = onSettingsClick,
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            GuideActionChip(
-                text = "영상 리플레이 테스트",
-                onClick = onReplayTestClick,
+                modifier = Modifier.width(112.dp),
             )
         }
     }
@@ -379,7 +507,6 @@ private fun GuideStatusOverlay(
 @Composable
 private fun CameraUiControls(
     onGuideClick: () -> Unit,
-    onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -389,11 +516,6 @@ private fun CameraUiControls(
         GuideActionChip(
             text = "큰 화면",
             onClick = onGuideClick,
-        )
-        Spacer(modifier = Modifier.height(10.dp))
-        GuideActionChip(
-            text = "설정",
-            onClick = onSettingsClick,
         )
     }
 }
@@ -409,6 +531,7 @@ private fun GuideActionChip(
         color = Color.White,
         fontSize = 16.sp,
         fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Center,
         modifier = modifier
             .background(Color(0x99121820), RoundedCornerShape(18.dp))
             .clickable(onClick = onClick)
@@ -483,6 +606,8 @@ private fun guideSensorStatus(status: FeedbackSensorStatus): String {
 private fun MeasurementOverlay(
     state: ArMeasurementState,
     feedbackState: FeedbackUiState,
+    debugFlags: DebugPipelineFlags,
+    onDebugFlagsChanged: (DebugPipelineFlags) -> Unit,
 ) {
     var debugVisible by remember { mutableStateOf(false) }
 
@@ -589,6 +714,8 @@ private fun MeasurementOverlay(
         if (debugVisible) {
             DebugOverlay(
                 state = state,
+                debugFlags = debugFlags,
+                onDebugFlagsChanged = onDebugFlagsChanged,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(start = 14.dp, top = 170.dp),
@@ -679,6 +806,8 @@ private fun ObjectDetectionOverlay(
 @Composable
 private fun DebugOverlay(
     state: ArMeasurementState,
+    debugFlags: DebugPipelineFlags,
+    onDebugFlagsChanged: (DebugPipelineFlags) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -690,6 +819,49 @@ private fun DebugOverlay(
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
         Text("AR", color = Color.White)
+        Spacer(modifier = Modifier.height(6.dp))
+        Text("Pipeline", color = Color(0xFFB7F7CE), fontSize = 12.sp)
+        DebugToggleRow(
+            label = "YOLO",
+            enabled = debugFlags.yoloEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(yoloEnabled = !debugFlags.yoloEnabled)) },
+        )
+        DebugToggleRow(
+            label = "Floor",
+            enabled = debugFlags.floorSegmentationEnabled,
+            onClick = {
+                onDebugFlagsChanged(
+                    debugFlags.copy(floorSegmentationEnabled = !debugFlags.floorSegmentationEnabled),
+                )
+            },
+        )
+        DebugToggleRow(
+            label = "AR hit",
+            enabled = debugFlags.arCoreHitTestEnabled,
+            onClick = {
+                onDebugFlagsChanged(debugFlags.copy(arCoreHitTestEnabled = !debugFlags.arCoreHitTestEnabled))
+            },
+        )
+        DebugToggleRow(
+            label = "Depth",
+            enabled = debugFlags.rawDepthEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(rawDepthEnabled = !debugFlags.rawDepthEnabled)) },
+        )
+        DebugToggleRow(
+            label = "Map",
+            enabled = debugFlags.localMapEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(localMapEnabled = !debugFlags.localMapEnabled)) },
+        )
+        DebugToggleRow(
+            label = "Cross",
+            enabled = debugFlags.crosswalkEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(crosswalkEnabled = !debugFlags.crosswalkEnabled)) },
+        )
+        DebugToggleRow(
+            label = "VLM",
+            enabled = debugFlags.vlmEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(vlmEnabled = !debugFlags.vlmEnabled)) },
+        )
         Spacer(modifier = Modifier.height(4.dp))
         WorldMapMiniMap(state = state)
         Spacer(modifier = Modifier.height(6.dp))
@@ -742,6 +914,16 @@ private fun DebugOverlay(
             "Crosswalk ${if (state.crosswalkDetected) "yes" else "no"} ${formatMapScore(state.crosswalkScore)} stripes ${state.crosswalkStripeCount} yolo ${formatMapScore(state.crosswalkYoloConfidence)} ${state.crosswalkModeLabel}",
             color = if (state.crosswalkDetected) Color(0xFFB6E7FF) else Color(0xFFD9E2EA),
         )
+        if (state.vlmModelName.isNotBlank()) {
+            Text(
+                "VLM ${state.vlmModelName} ${state.vlmRiskLabel} ${state.vlmConfidenceScore}%",
+                color = if (state.vlmModelName.contains("fallback", ignoreCase = true)) {
+                    Color(0xFFFFE08B)
+                } else {
+                    Color(0xFFB6E7FF)
+                },
+            )
+        }
         Text(
             state.statusLabel,
             color = when (state.statusLevel) {
@@ -754,6 +936,36 @@ private fun DebugOverlay(
         if (state.note.isNotBlank()) {
             Text(state.note, color = Color(0xFFD9E2EA))
         }
+    }
+}
+
+@Composable
+private fun DebugToggleRow(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = Color(0xFFD9E2EA), fontSize = 12.sp)
+        Text(
+            text = if (enabled) "ON" else "OFF",
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .background(
+                    if (enabled) Color(0xBF15803D) else Color(0xBFB91C1C),
+                    RoundedCornerShape(10.dp),
+                )
+                .clickable(onClick = onClick)
+                .padding(horizontal = 9.dp, vertical = 4.dp),
+        )
     }
 }
 

@@ -59,7 +59,7 @@ class SpatialReplayTestActivity : AppCompatActivity() {
     private val currentVideoUri = mutableStateOf<Uri?>(null)
     private val currentResult = mutableStateOf<VideoFrameAnalysisResult?>(null)
     private val currentMeasurementState = mutableStateOf(ArMeasurementState())
-    private val statusMessage = mutableStateOf("Select a video to start replay analysis.")
+    private val statusMessage = mutableStateOf("분석할 영상을 선택하세요.")
     private val progress = mutableFloatStateOf(0f)
     private val processingFps = mutableFloatStateOf(0f)
     private var replayJob: Job? = null
@@ -69,7 +69,7 @@ class SpatialReplayTestActivity : AppCompatActivity() {
 
     private val pickVideo = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) {
-            statusMessage.value = "Video selection was cancelled."
+            statusMessage.value = "영상 선택이 취소되었습니다."
             feedbackViewModel.onInput(FeedbackInput.SensorStatus(FeedbackSensorStatus.WAITING))
             return@registerForActivityResult
         }
@@ -100,19 +100,18 @@ class SpatialReplayTestActivity : AppCompatActivity() {
                     onPickVideo = { pickVideo.launch(arrayOf("video/*")) },
                     onVideoReady = { uri -> startAnalysisIfNeeded(uri) },
                     onVideoError = {
-                        statusMessage.value = "Video playback failed. Select another video file."
+                        statusMessage.value = "영상을 재생하지 못했습니다. 다른 영상 파일을 선택하세요."
                     },
                     onClose = {
-                        startActivity(Intent(this@SpatialReplayTestActivity, MainActivity::class.java))
                         finish()
                     },
                 )
             }
         }
         statusMessage.value = if (currentVideoUri.value == null) {
-            "Choose a replay video. Live AR camera input is not used in this test."
+            "영상 테스트는 라이브 AR 카메라 대신 선택한 영상을 분석합니다."
         } else {
-            "Video restored. Spatial analysis will start automatically."
+            "저장된 영상을 불러왔습니다. 분석을 시작합니다."
         }
         if (savedInstanceState == null && currentVideoUri.value == null && !pickerLaunched) {
             pickerLaunched = true
@@ -136,7 +135,7 @@ class SpatialReplayTestActivity : AppCompatActivity() {
         currentResult.value = null
         progress.floatValue = 0f
         processingFps.floatValue = 0f
-        statusMessage.value = "Video loaded. Spatial analysis will start automatically."
+        statusMessage.value = "영상을 불러왔습니다. 자동으로 분석을 시작합니다."
     }
 
     private fun startAnalysisIfNeeded(uri: Uri) {
@@ -148,7 +147,7 @@ class SpatialReplayTestActivity : AppCompatActivity() {
         currentResult.value = null
         progress.floatValue = 0f
         processingFps.floatValue = 0f
-        statusMessage.value = "Replacing live camera input with replay video frames..."
+        statusMessage.value = "라이브 카메라 대신 영상 프레임을 분석 중입니다."
 
         replayJob = lifecycleScope.launch {
             val source = VideoReplayFrameSource(
@@ -181,14 +180,14 @@ class SpatialReplayTestActivity : AppCompatActivity() {
                         processingFps.floatValue = processedFrames / elapsedSeconds
                         feedbackViewModel.onInput(result.feedbackInput)
                         statusMessage.value =
-                            "Replay analysis running. Live AR camera input is disabled for this test."
+                            "영상 분석 중입니다. 이 테스트에서는 라이브 AR 카메라를 사용하지 않습니다."
                     }
                 }
-                statusMessage.value = "Replay analysis finished. Video playback remains looped."
+                statusMessage.value = "영상 분석이 끝났습니다. 영상 재생은 반복됩니다."
             } catch (_: CancellationException) {
-                statusMessage.value = "Replay stopped."
+                statusMessage.value = "영상 분석을 중지했습니다."
             } catch (error: Exception) {
-                statusMessage.value = "Video replay failed: ${error.message ?: "unknown error"}"
+                statusMessage.value = "영상 테스트 오류: ${error.message ?: "알 수 없는 오류"}"
                 feedbackViewModel.onInput(FeedbackInput.SensorStatus(FeedbackSensorStatus.ERROR))
             }
         }
@@ -297,7 +296,7 @@ private fun SpatialReplayTestScreen(
             )
         } else {
             Text(
-                text = "Video Spatial Replay Test",
+                text = "영상 테스트",
                 color = Color.White,
                 fontSize = 28.sp,
                 fontWeight = FontWeight.Bold,
@@ -335,9 +334,9 @@ private fun SpatialReplayTestScreen(
                 .padding(14.dp),
             horizontalAlignment = Alignment.End,
         ) {
-            ReplayChip(text = "Select Video", onClick = onPickVideo)
+            ReplayChip(text = "영상 선택", onClick = onPickVideo)
             Spacer(modifier = Modifier.height(10.dp))
-            ReplayChip(text = "Close", onClick = onClose)
+            ReplayChip(text = "닫기", onClick = onClose)
         }
     }
 }
@@ -357,7 +356,7 @@ private fun ReplayInfoPanel(
             .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Text(
-            text = "VideoReplaySpatialTest",
+            text = "영상 테스트",
             color = Color.White,
             fontSize = 15.sp,
             fontWeight = FontWeight.Bold,
@@ -366,35 +365,33 @@ private fun ReplayInfoPanel(
         Text(statusMessage, color = Color(0xFFD8E3EE), fontSize = 12.sp)
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = "sample=${result?.frameTimeMs ?: 0}ms  analysis=${String.format("%.1f", processingFps)}fps",
+            text = "프레임=${result?.frameTimeMs ?: 0}ms  분석=${String.format("%.1f", processingFps)}fps",
             color = Color(0xFFD8E3EE),
             fontSize = 12.sp,
         )
         Text(
-            text = "analysis progress=${(progress * 100f).toInt()}%",
+            text = "분석 진행률 ${(progress * 100f).toInt()}%",
             color = Color(0xFFD8E3EE),
+            fontSize = 12.sp,
+        )
+        Text(
+            text = "초록 선: 바닥과 장애물/벽이 갈리는 경계 추정",
+            color = Color(0xFF9BE7B6),
             fontSize = 12.sp,
         )
         result?.let {
             Spacer(modifier = Modifier.height(8.dp))
             Text(it.summary, color = Color(0xFFB7F7CE), fontSize = 12.sp)
             Text(
-                text = "detector=${it.debugInfo.detectorReady} raw=${it.debugInfo.rawDetectionCount} tracked=${it.debugInfo.trackedDetectionCount}",
+                text = "탐지=${it.debugInfo.detectorReady} 원본=${it.debugInfo.rawDetectionCount} 추적=${it.debugInfo.trackedDetectionCount}",
                 color = Color(0xFFD8E3EE),
                 fontSize = 12.sp,
             )
             Text(
-                text = "ARCore pose/depth/plane: unavailable in video replay",
+                text = "영상 테스트에서는 ARCore 자세, 깊이, 평면 정보를 사용할 수 없습니다.",
                 color = Color(0xFFFFDB7A),
                 fontSize = 12.sp,
             )
-            it.vlmInterpretation?.let { vlm ->
-                Text(
-                    text = "vlm=${vlm.modelName} risk=${vlm.risk.name.lowercase()} conf=${(vlm.confidence * 100f).toInt()}%",
-                    color = Color(0xFF9BD7FF),
-                    fontSize = 12.sp,
-                )
-            }
         }
     }
 }
