@@ -11,8 +11,10 @@ import java.io.File
 import kotlin.math.roundToInt
 
 data class ResourceUsageSnapshot(
-    val cpuPercent: Float = 0f,
-    val systemCpuPercent: Float = 0f,
+    val cpuCorePercent: Float = 0f,
+    val cpuDevicePercent: Float = 0f,
+    val systemCpuPercent: Float? = null,
+    val cpuCoreCount: Int = 1,
     val gpuPercent: Int? = null,
     val gpuSourceLabel: String = "none",
     val appRamPercent: Float = 0f,
@@ -45,9 +47,16 @@ class ResourceMonitor(
         val wallMillis: Long,
     )
 
+    private data class CpuSample(
+        val appCorePercent: Float,
+        val appDevicePercent: Float,
+        val systemPercent: Float?,
+    )
+
     private val appContext = context.applicationContext
     private val activityManager = appContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
     private val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+    private val cpuCoreCount = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
     private var previousAppCpuSample: AppCpuSample? = null
     private var previousSystemCpuTimes: CpuTimes? = null
     private var previousGpuTimes: GpuTimes? = null
@@ -67,8 +76,10 @@ class ResourceMonitor(
         val gpu = sampleGpu()
         val ram = sampleRam()
         return ResourceUsageSnapshot(
-            cpuPercent = cpu.first,
-            systemCpuPercent = cpu.second,
+            cpuCorePercent = cpu.appCorePercent,
+            cpuDevicePercent = cpu.appDevicePercent,
+            systemCpuPercent = cpu.systemPercent,
+            cpuCoreCount = cpuCoreCount,
             gpuPercent = gpu?.percent,
             gpuSourceLabel = gpu?.sourceLabel ?: "none",
             appRamPercent = ram.appPercent,
@@ -78,13 +89,20 @@ class ResourceMonitor(
         )
     }
 
-    private fun sampleCpu(): Pair<Float, Float> {
-        val appPercent = sampleAppCpuPercent()
-        val systemPercent = sampleSystemCpuPercent()
-        return appPercent to systemPercent
+    private fun sampleCpu(): CpuSample {
+        val appCorePercent = sampleAppCpuCorePercent()
+        val appDevicePercent = (appCorePercent / cpuCoreCount.toFloat()).coerceIn(0f, 100f)
+        val rawSystemPercent = sampleSystemCpuPercent()
+        val systemPercent = rawSystemPercent
+            ?.takeUnless { appCorePercent > 5f && it < 0.1f }
+        return CpuSample(
+            appCorePercent = appCorePercent,
+            appDevicePercent = appDevicePercent,
+            systemPercent = systemPercent,
+        )
     }
 
-    private fun sampleAppCpuPercent(): Float {
+    private fun sampleAppCpuCorePercent(): Float {
         val current = AppCpuSample(
             cpuMillis = Process.getElapsedCpuTime(),
             wallMillis = SystemClock.elapsedRealtime(),
@@ -97,10 +115,11 @@ class ResourceMonitor(
             .coerceIn(0f, 999f)
     }
 
-    private fun sampleSystemCpuPercent(): Float {
-        val current = readSystemCpuTimes() ?: return 0f
-        val previous = previousSystemCpuTimes.also { previousSystemCpuTimes = current } ?: return 0f
-        val totalDelta = (current.totalTicks - previous.totalTicks).coerceAtLeast(1L)
+    private fun sampleSystemCpuPercent(): Float? {
+        val current = readSystemCpuTimes() ?: return null
+        val previous = previousSystemCpuTimes.also { previousSystemCpuTimes = current } ?: return null
+        val totalDelta = current.totalTicks - previous.totalTicks
+        if (totalDelta <= 0L) return null
         val idleDelta = (current.idleTicks - previous.idleTicks).coerceAtLeast(0L)
         return (((totalDelta - idleDelta).toDouble() / totalDelta.toDouble()) * 100.0)
             .toFloat()

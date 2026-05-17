@@ -415,8 +415,9 @@ private fun ResourceUsagePanel(
             fontWeight = FontWeight.Bold,
         )
         Spacer(modifier = Modifier.height(5.dp))
-        ResourceUsageRow("CPU", "${formatPercent(usage.cpuPercent)}% app")
-        ResourceUsageRow("SYS", "${formatPercent(usage.systemCpuPercent)}%")
+        ResourceUsageRow("CPU", "${formatPercent(usage.cpuCorePercent)}% core")
+        ResourceUsageRow("Ctot", "${formatPercent(usage.cpuDevicePercent)}%/${usage.cpuCoreCount}")
+        ResourceUsageRow("SYS", usage.systemCpuPercent?.let { "${formatPercent(it)}%" } ?: "--")
         ResourceUsageRow("GPU", usage.gpuPercent?.let { "$it%" } ?: "--")
         ResourceUsageRow("Gsrc", usage.gpuSourceLabel)
         ResourceUsageRow("APP", "${usage.appRamMegabytes}MB")
