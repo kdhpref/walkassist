@@ -5,48 +5,96 @@ import androidx.lifecycle.viewModelScope
 import com.example.walkassist.feedback.core.FeedbackAlertLevel
 import com.example.walkassist.feedback.core.FeedbackInput
 import com.example.walkassist.feedback.core.FeedbackPolicy
+import com.example.walkassist.feedback.core.FeedbackRequest
 import com.example.walkassist.feedback.core.FeedbackSensorStatus
-import com.example.walkassist.feedback.core.FeedbackThresholds
 import com.example.walkassist.feedback.core.FeedbackUiState
-import java.util.ArrayDeque
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
-class FeedbackViewModel : ViewModel() {
-    private val policy = FeedbackPolicy()
-    private val confidenceWindow = ArrayDeque<Boolean>()
-    private val _uiState = MutableStateFlow(FeedbackUiState())
+class FeedbackViewModel(
+    private val feedbackPolicy: FeedbackPolicy = FeedbackPolicy()
+) : ViewModel() {
 
+    private val _uiState = MutableStateFlow(FeedbackUiState())
     val uiState: StateFlow<FeedbackUiState> = _uiState.asStateFlow()
 
-    private var lastValidDataTimeMillis = 0L
-    private var lastAnnouncedLevel: FeedbackAlertLevel? = null
-    private var lastAnnouncedTimeMillis = 0L
     private var watchdogJob: Job? = null
+    private var lastInputTimeMillis: Long = System.currentTimeMillis()
 
+    fun onInput(input: FeedbackInput) {
+        lastInputTimeMillis = System.currentTimeMillis()
+
+        val previous = _uiState.value
+
+        val next = when (input) {
+            is FeedbackInput.SensorStatus -> {
+                handleSensorStatusInput(
+                    previous = previous,
+                    status = input.status
+                )
+            }
+
+            is FeedbackInput.Obstacle -> {
+                handleObstacleInput(
+                    previous = previous,
+                    input = input
+                )
+            }
+
+            is FeedbackInput.Message -> {
+                handleMessageInput(
+                    previous = previous,
+                    input = input
+                )
+            }
+        }
+
+        _uiState.value = next
+    }
+
+    /**
+     * MainActivity에서 TTS/진동 출력을 한 번 처리한 뒤 다시 false로 내려줍니다.
+     */
+    fun consumeAnnouncement() {
+        _uiState.value = _uiState.value.copy(
+            shouldAnnounce = false
+        )
+    }
+
+    /**
+     * AR 입력이 일정 시간 들어오지 않을 때 센서 끊김 상태로 전환합니다.
+     */
     fun startWatchdog() {
-        if (watchdogJob?.isActive == true) return
+        if (watchdogJob != null) return
 
         watchdogJob = viewModelScope.launch {
             while (isActive) {
-                delay(FeedbackThresholds.SENSOR_WATCHDOG_MS / 2)
-                val now = System.currentTimeMillis()
-                val state = _uiState.value
-                if (
-                    state.sensorStatus == FeedbackSensorStatus.CONNECTED &&
-                    now - lastValidDataTimeMillis > FeedbackThresholds.SENSOR_WATCHDOG_MS
-                ) {
-                    _uiState.update {
-                        it.copy(
+                delay(WATCHDOG_CHECK_INTERVAL_MS)
+
+                val elapsedMillis = System.currentTimeMillis() - lastInputTimeMillis
+
+                if (elapsedMillis > WATCHDOG_DISCONNECTED_TIMEOUT_MS) {
+                    val previous = _uiState.value
+
+                    if (previous.sensorStatus != FeedbackSensorStatus.DISCONNECTED) {
+                        val request = feedbackPolicy.sensorStatusRequest(
+                            FeedbackSensorStatus.DISCONNECTED
+                        )
+
+                        _uiState.value = request.toUiState(
                             sensorStatus = FeedbackSensorStatus.DISCONNECTED,
-                            message = policy.statusMessage(FeedbackSensorStatus.DISCONNECTED),
-                            shouldAnnounce = true,
+                            confidence = 0f,
+                            direction = previous.direction,
+                            crosswalkDetected = previous.crosswalkDetected,
+                            shouldAnnounce = shouldAnnounceRequest(
+                                previous = previous,
+                                request = request
+                            )
                         )
                     }
                 }
@@ -54,89 +102,176 @@ class FeedbackViewModel : ViewModel() {
         }
     }
 
-    fun onInput(input: FeedbackInput, nowMillis: Long = System.currentTimeMillis()) {
-        when (input) {
-            is FeedbackInput.Obstacle -> reportObstacle(input, nowMillis)
-            is FeedbackInput.SensorStatus -> reportSensorStatus(input.status)
-        }
+    override fun onCleared() {
+        watchdogJob?.cancel()
+        watchdogJob = null
+        super.onCleared()
     }
 
-    fun consumeAnnouncement() {
-        _uiState.update { it.copy(shouldAnnounce = false) }
-    }
+    private fun handleSensorStatusInput(
+        previous: FeedbackUiState,
+        status: FeedbackSensorStatus
+    ): FeedbackUiState {
+        val request = feedbackPolicy.sensorStatusRequest(status)
 
-    private fun reportObstacle(input: FeedbackInput.Obstacle, nowMillis: Long) {
-        val sample = input.sample
-        if (!sample.isValid() || !sample.isFresh(nowMillis, FeedbackThresholds.DATA_FRESHNESS_MS)) {
-            return
+        val nextDistanceMeters = when (status) {
+            FeedbackSensorStatus.CONNECTED -> previous.distanceMeters
+            FeedbackSensorStatus.WAITING,
+            FeedbackSensorStatus.DISCONNECTED,
+            FeedbackSensorStatus.ERROR -> null
         }
 
-        updateConfidenceWindow(sample.confidence >= FeedbackThresholds.MIN_CONFIDENCE)
-        if (!isConfidenceWindowStable()) {
-            return
+        val nextConfidence = when (status) {
+            FeedbackSensorStatus.CONNECTED -> previous.confidence
+            FeedbackSensorStatus.WAITING,
+            FeedbackSensorStatus.DISCONNECTED,
+            FeedbackSensorStatus.ERROR -> 0f
         }
 
-        lastValidDataTimeMillis = nowMillis
-        val decision = policy.decide(
-            distanceMeters = sample.distanceMeters,
-            currentLevel = _uiState.value.alertLevel,
+        val nextDirection = when (status) {
+            FeedbackSensorStatus.CONNECTED -> previous.direction
+            FeedbackSensorStatus.WAITING,
+            FeedbackSensorStatus.DISCONNECTED,
+            FeedbackSensorStatus.ERROR -> "unknown"
+        }
+
+        val nextCrosswalkDetected = when (status) {
+            FeedbackSensorStatus.CONNECTED -> previous.crosswalkDetected
+            FeedbackSensorStatus.WAITING,
+            FeedbackSensorStatus.DISCONNECTED,
+            FeedbackSensorStatus.ERROR -> false
+        }
+
+        return FeedbackUiState(
+            alertLevel = request.alertLevel,
+            sensorStatus = status,
+            distanceMeters = nextDistanceMeters,
+            crosswalkDetected = nextCrosswalkDetected,
+            direction = nextDirection,
+            message = request.message,
+            confidence = nextConfidence,
+            shouldAnnounce = shouldAnnounceRequest(
+                previous = previous,
+                request = request
+            )
         )
-        val shouldAnnounce = shouldAnnounce(decision.alertLevel, nowMillis)
+    }
 
-        _uiState.update {
-            it.copy(
-                alertLevel = decision.alertLevel,
-                sensorStatus = FeedbackSensorStatus.CONNECTED,
-                distanceMeters = sample.distanceMeters,
-                confidence = sample.confidence,
-                message = decision.message,
-                shouldAnnounce = shouldAnnounce,
+    private fun handleObstacleInput(
+        previous: FeedbackUiState,
+        input: FeedbackInput.Obstacle
+    ): FeedbackUiState {
+        val request = feedbackPolicy.obstacleRequest(
+            distanceMeters = input.sample.distanceMeters,
+            direction = input.direction,
+            crosswalkDetected = input.crosswalkDetected
+        )
+
+        return request.toUiState(
+            sensorStatus = FeedbackSensorStatus.CONNECTED,
+            confidence = input.sample.confidence.coerceIn(0f, 1f),
+            direction = input.direction,
+            crosswalkDetected = input.crosswalkDetected,
+            shouldAnnounce = shouldAnnounceRequest(
+                previous = previous,
+                request = request
             )
-        }
+        )
     }
 
-    private fun reportSensorStatus(status: FeedbackSensorStatus) {
-        val previousStatus = _uiState.value.sensorStatus
-        _uiState.update {
-            it.copy(
-                sensorStatus = status,
-                message = policy.statusMessage(status),
-                shouldAnnounce = status != FeedbackSensorStatus.CONNECTED && status != previousStatus,
+    private fun handleMessageInput(
+        previous: FeedbackUiState,
+        input: FeedbackInput.Message
+    ): FeedbackUiState {
+        val normalizedMessage = input.message.trim()
+
+        return FeedbackUiState(
+            alertLevel = input.alertLevel,
+            sensorStatus = input.sensorStatus,
+            distanceMeters = input.distanceMeters,
+            crosswalkDetected = input.crosswalkDetected,
+            direction = input.direction,
+            message = normalizedMessage,
+            confidence = input.confidence.coerceIn(0f, 1f),
+            shouldAnnounce = shouldAnnounceMessage(
+                previous = previous,
+                nextAlertLevel = input.alertLevel,
+                nextMessage = normalizedMessage
             )
-        }
+        )
     }
 
-    private fun updateConfidenceWindow(isValid: Boolean) {
-        confidenceWindow.addLast(isValid)
-        while (confidenceWindow.size > FeedbackThresholds.CONFIDENCE_WINDOW_SIZE) {
-            confidenceWindow.removeFirst()
-        }
+    private fun FeedbackRequest.toUiState(
+        sensorStatus: FeedbackSensorStatus,
+        confidence: Float,
+        direction: String,
+        crosswalkDetected: Boolean,
+        shouldAnnounce: Boolean
+    ): FeedbackUiState {
+        return FeedbackUiState(
+            alertLevel = alertLevel,
+            sensorStatus = sensorStatus,
+            distanceMeters = distanceMeters,
+            crosswalkDetected = crosswalkDetected,
+            direction = direction,
+            message = message,
+            confidence = confidence,
+            shouldAnnounce = shouldAnnounce
+        )
     }
 
-    private fun isConfidenceWindowStable(): Boolean {
-        if (confidenceWindow.size < FeedbackThresholds.CONFIDENCE_WINDOW_SIZE) {
+    private fun shouldAnnounceRequest(
+        previous: FeedbackUiState,
+        request: FeedbackRequest
+    ): Boolean {
+        if (!request.outputMode.useSpeech && !request.outputMode.useHaptic) {
             return false
         }
-        val validCount = confidenceWindow.count { it }
-        return validCount.toFloat() / confidenceWindow.size >=
-            FeedbackThresholds.CONFIDENCE_VALID_MIN_RATIO
-    }
 
-    private fun shouldAnnounce(level: FeedbackAlertLevel, nowMillis: Long): Boolean {
-        val isLevelChanged = level != lastAnnouncedLevel
-        val isThrottleExpired = nowMillis - lastAnnouncedTimeMillis >
-            FeedbackThresholds.ANNOUNCE_THROTTLE_MS
-
-        if (isLevelChanged || isThrottleExpired) {
-            lastAnnouncedLevel = level
-            lastAnnouncedTimeMillis = nowMillis
+        if (request.priority == 1) {
             return true
         }
+
+        if (
+            previous.sensorStatus != FeedbackSensorStatus.CONNECTED &&
+            request.alertLevel == FeedbackAlertLevel.DANGER
+        ) {
+            return true
+        }
+
+        if (previous.alertLevel != request.alertLevel) {
+            return true
+        }
+
+        if (
+            previous.message != request.message &&
+            request.alertLevel != FeedbackAlertLevel.SAFE
+        ) {
+            return true
+        }
+
         return false
     }
 
-    override fun onCleared() {
-        watchdogJob?.cancel()
-        super.onCleared()
+    private fun shouldAnnounceMessage(
+        previous: FeedbackUiState,
+        nextAlertLevel: FeedbackAlertLevel,
+        nextMessage: String
+    ): Boolean {
+        if (nextAlertLevel == FeedbackAlertLevel.DANGER) {
+            return true
+        }
+
+        if (nextAlertLevel == FeedbackAlertLevel.SAFE) {
+            return false
+        }
+
+        return previous.alertLevel != nextAlertLevel ||
+                previous.message != nextMessage
+    }
+
+    companion object {
+        private const val WATCHDOG_CHECK_INTERVAL_MS = 2_000L
+        private const val WATCHDOG_DISCONNECTED_TIMEOUT_MS = 5_000L
     }
 }
