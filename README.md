@@ -41,9 +41,15 @@ cmd /c gradlew.bat assembleDebug
 cmd /c gradlew.bat installDebug
 ```
 
-## Gemini API VLM
+## VLM options
 
-The VLM button sends the current camera image plus compact CV hints to Gemini
+The VLM button uses the model selected in the app settings. Available choices are:
+
+- Gemini API
+- Florence-2 INT4 from `onnx-community/Florence-2-base-ft`
+- Florence-2 INT8 from `onnx-community/Florence-2-base-ft`
+
+Gemini sends the current camera image plus compact CV hints to the Gemini API
 and asks for a short Korean walking-scene description. The request is one-shot:
 Gemini is called only when the user presses the VLM button.
 
@@ -55,6 +61,13 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 The key is exposed to the app through `BuildConfig.GEMINI_API_KEY`; do not put it
 in source-controlled Kotlin files.
+
+Florence-2 INT4 and INT8 assets are downloaded to the app external files model
+directory from the VLM settings screen. Desktop downloads can also be prepared with:
+
+```powershell
+python desktop_tools\florence2\download_onnx_community_assets.py --output-dir florence-2-base-ft
+```
 
 ## Next recommended work
 

@@ -183,14 +183,14 @@ class MainActivity : AppCompatActivity() {
     private fun prepareVlmModelAtStartup() {
         lifecycleScope.launch(Dispatchers.IO) {
             val status = runCatching {
-                GeminiVlmSceneInterpreter().prepareForUse()
+                WalkAssistVlmFactory.prepareSelected(this@MainActivity)
             }.onFailure {
                 Log.w(TAG, "VLM startup preparation failed", it)
             }.getOrElse {
                 VlmModelPreparationStatus(
-                    modelName = "gemini-2.5-flash-lite",
+                    modelName = WalkAssistSettings.vlmModelOption(this@MainActivity).displayName,
                     statusLabel = "unknown",
-                    downloadState = "remote_api",
+                    downloadState = null,
                     isAvailable = false,
                     isFallbackLikely = true,
                     explanation = "장면 분석 모델 상태를 확인하지 못했습니다.",
@@ -207,9 +207,9 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(
                     this@MainActivity,
                     if (status.isAvailable) {
-                        "Gemini VLM 준비 완료: ${status.modelName}"
+                        "VLM 준비 완료: ${status.modelName}"
                     } else {
-                        "Gemini VLM ${status.statusLabel}. ${status.explanation}"
+                        "VLM ${status.statusLabel}. ${status.explanation}"
                     },
                     Toast.LENGTH_LONG,
                 ).show()

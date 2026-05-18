@@ -13,6 +13,7 @@ object WalkAssistSettings {
     private const val KEY_DEBUG_LOCAL_MAP_ENABLED = "debug_local_map_enabled"
     private const val KEY_DEBUG_CROSSWALK_ENABLED = "debug_crosswalk_enabled"
     private const val KEY_DEBUG_VLM_ENABLED = "debug_vlm_enabled"
+    private const val KEY_VLM_MODEL_OPTION = "vlm_model_option"
 
     const val GEMMA_3N_MODEL_REPOSITORY = "google/gemma-3n-E2B-it-litert-lm"
     const val DEFAULT_GEMMA_3N_MODEL_FILENAME = "gemma-3n-E2B-it-int4.litertlm"
@@ -36,6 +37,21 @@ object WalkAssistSettings {
         preferences(context)
             .edit()
             .putString(KEY_GEMMA_3N_MODEL_PATH, modelPath)
+            .apply()
+    }
+
+    fun vlmModelOption(context: Context): VlmModelOption {
+        val storedValue = preferences(context).getString(KEY_VLM_MODEL_OPTION, "").orEmpty()
+        return VlmModelOption.fromPreferenceValue(storedValue)
+    }
+
+    fun setVlmModelOption(
+        context: Context,
+        option: VlmModelOption,
+    ) {
+        preferences(context)
+            .edit()
+            .putString(KEY_VLM_MODEL_OPTION, option.preferenceValue)
             .apply()
     }
 
