@@ -8,9 +8,8 @@ import android.graphics.RectF
 import android.util.Log
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.support.common.FileUtil
-import org.tensorflow.lite.support.image.TensorImage
-import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.math.exp
 import kotlin.math.roundToInt
 
@@ -18,6 +17,8 @@ class ObjectAnalyzer(context: Context) {
     companion object {
         private const val MODEL_ASSET_NAME = "yolo26n-seg.tflite"
         private const val LABELS_ASSET_NAME = "labels.txt"
+        private const val CHANNELS_RGB = 3
+        private const val FLOAT_BYTES = 4
     }
 
     private data class SegmentSummary(
@@ -46,11 +47,11 @@ class ObjectAnalyzer(context: Context) {
         var localOutputShapeDescription = "unavailable"
 
         try {
-            val modelBuffer = FileUtil.loadMappedFile(context, MODEL_ASSET_NAME)
+            val modelBuffer = TfliteAssetUtils.loadMappedAsset(context, MODEL_ASSET_NAME)
             localInterpreter = Interpreter(modelBuffer, Interpreter.Options().apply {
                 numThreads = 4
             })
-            localLabels = FileUtil.loadLabels(context, LABELS_ASSET_NAME)
+            localLabels = TfliteAssetUtils.loadLabels(context, LABELS_ASSET_NAME)
             val inputShape = localInterpreter.getInputTensor(0).shape()
             if (inputShape.size >= 3) {
                 localInputHeight = inputShape[1]
@@ -104,27 +105,11 @@ class ObjectAnalyzer(context: Context) {
             val inputTensor = localInterpreter.getInputTensor(0)
             val isQuantized =
                 inputTensor.dataType() == DataType.UINT8 || inputTensor.dataType() == DataType.INT8
-            val tensorImage = TensorImage(if (isQuantized) DataType.UINT8 else DataType.FLOAT32)
-            tensorImage.load(paddedBitmap)
 
             val inputBuffer = if (isQuantized) {
-                tensorImage.buffer
+                createQuantizedRgbInputBuffer(paddedBitmap)
             } else {
-                val floatBuffer = TensorBuffer.createFixedSize(
-                    intArrayOf(1, inputHeight, inputWidth, 3),
-                    DataType.FLOAT32,
-                )
-                val pixels = IntArray(inputWidth * inputHeight)
-                paddedBitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
-                val floatArray = FloatArray(inputWidth * inputHeight * 3)
-                for (i in pixels.indices) {
-                    val color = pixels[i]
-                    floatArray[i * 3] = ((color shr 16) and 0xFF) / 255f
-                    floatArray[i * 3 + 1] = ((color shr 8) and 0xFF) / 255f
-                    floatArray[i * 3 + 2] = (color and 0xFF) / 255f
-                }
-                floatBuffer.loadArray(floatArray)
-                floatBuffer.buffer
+                createFloatRgbInputBuffer(paddedBitmap)
             }
 
             val detections = if (isEndToEndSegmentationOutput(localInterpreter)) {
@@ -144,10 +129,11 @@ class ObjectAnalyzer(context: Context) {
                     return emptyList()
                 }
 
-                val outputBuffer = TensorBuffer.createFixedSize(outShape, DataType.FLOAT32)
-                localInterpreter.run(inputBuffer, outputBuffer.buffer.rewind())
+                val outputBuffer = ByteBuffer.allocateDirect(outShape.product() * FLOAT_BYTES)
+                    .order(ByteOrder.nativeOrder())
+                localInterpreter.run(inputBuffer.rewind(), outputBuffer.rewind())
                 parseDetections(
-                    outputArray = outputBuffer.floatArray,
+                    outputArray = outputBuffer.toFloatArray(),
                     dim1 = outShape[1],
                     dim2 = outShape[2],
                     imageWidth = bitmap.width,
@@ -172,6 +158,40 @@ class ObjectAnalyzer(context: Context) {
 
     fun close() {
         interpreter?.close()
+    }
+
+    private fun createQuantizedRgbInputBuffer(bitmap: Bitmap): ByteBuffer {
+        val inputBuffer = ByteBuffer.allocateDirect(inputWidth * inputHeight * CHANNELS_RGB)
+            .order(ByteOrder.nativeOrder())
+        val pixels = IntArray(inputWidth * inputHeight)
+        bitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
+        for (pixel in pixels) {
+            inputBuffer.put(((pixel shr 16) and 0xFF).toByte())
+            inputBuffer.put(((pixel shr 8) and 0xFF).toByte())
+            inputBuffer.put((pixel and 0xFF).toByte())
+        }
+        return inputBuffer.rewind() as ByteBuffer
+    }
+
+    private fun createFloatRgbInputBuffer(bitmap: Bitmap): ByteBuffer {
+        val inputBuffer = ByteBuffer.allocateDirect(inputWidth * inputHeight * CHANNELS_RGB * FLOAT_BYTES)
+            .order(ByteOrder.nativeOrder())
+        val pixels = IntArray(inputWidth * inputHeight)
+        bitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
+        for (pixel in pixels) {
+            inputBuffer.putFloat((((pixel shr 16) and 0xFF) / 255f))
+            inputBuffer.putFloat((((pixel shr 8) and 0xFF) / 255f))
+            inputBuffer.putFloat(((pixel and 0xFF) / 255f))
+        }
+        return inputBuffer.rewind() as ByteBuffer
+    }
+
+    private fun IntArray.product(): Int = fold(1) { total, value -> total * value }
+
+    private fun ByteBuffer.toFloatArray(): FloatArray {
+        rewind()
+        val floatBuffer = asFloatBuffer()
+        return FloatArray(floatBuffer.remaining()).also(floatBuffer::get)
     }
 
     private fun isEndToEndSegmentationOutput(interpreter: Interpreter): Boolean {

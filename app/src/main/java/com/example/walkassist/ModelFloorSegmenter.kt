@@ -2,12 +2,11 @@ package com.example.walkassist
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Rect
 import android.util.Log
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.support.common.FileUtil
+import org.tensorflow.lite.gpu.CompatibilityList
+import org.tensorflow.lite.gpu.GpuDelegate
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -17,6 +16,7 @@ class ModelFloorSegmenter(
 ) {
     private val heuristicSegmenter = FloorSegmenter()
     private val interpreter: Interpreter?
+    private val gpuDelegate: GpuDelegate?
     private val inputHeight: Int
     private val inputWidth: Int
     private val outputHeight: Int
@@ -32,6 +32,7 @@ class ModelFloorSegmenter(
 
     init {
         var localInterpreter: Interpreter? = null
+        var localGpuDelegate: GpuDelegate? = null
         var localInputHeight = 0
         var localInputWidth = 0
         var localOutputHeight = 0
@@ -41,8 +42,18 @@ class ModelFloorSegmenter(
         var localOutputBuffer: ByteBuffer? = null
 
         try {
-            val modelBuffer = FileUtil.loadMappedFile(context, "deeplabv3_cityscapes.tflite")
-            localInterpreter = Interpreter(modelBuffer, Interpreter.Options().apply { numThreads = 2 })
+            val modelBuffer = TfliteAssetUtils.loadMappedAsset(context, "deeplabv3_cityscapes.tflite")
+            val compatibilityList = CompatibilityList()
+            val options = Interpreter.Options()
+            if (compatibilityList.isDelegateSupportedOnThisDevice) {
+                localGpuDelegate = GpuDelegate(compatibilityList.bestOptionsForThisDevice)
+                options.addDelegate(localGpuDelegate)
+                lastMode = "gpu-model"
+            } else {
+                options.setNumThreads(2)
+                lastMode = "model"
+            }
+            localInterpreter = Interpreter(modelBuffer, options)
             val inputShape = localInterpreter.getInputTensor(0).shape()
             val outputShape = localInterpreter.getOutputTensor(0).shape()
             localInputHeight = inputShape[1]
@@ -54,13 +65,15 @@ class ModelFloorSegmenter(
                 .order(ByteOrder.nativeOrder())
             localOutputBuffer = ByteBuffer.allocateDirect(4 * localOutputHeight * localOutputWidth * localOutputClasses)
                 .order(ByteOrder.nativeOrder())
-            lastMode = "model"
         } catch (exception: Exception) {
+            localGpuDelegate?.close()
+            localGpuDelegate = null
             Log.e("ModelFloorSegmenter", "Failed to initialize Cityscapes model", exception)
             lastMode = "heuristic-fallback"
         }
 
         interpreter = localInterpreter
+        gpuDelegate = localGpuDelegate
         inputHeight = localInputHeight
         inputWidth = localInputWidth
         outputHeight = localOutputHeight
@@ -81,17 +94,12 @@ class ModelFloorSegmenter(
 
         // Throttle the heavy Cityscapes model and reuse the last good mask between inferences.
         if (cachedResult != null && nowMs - lastInferenceAtMs < 1200L) {
-            lastMode = "cached-model"
+            lastMode = if (gpuDelegate != null) "cached-gpu-model" else "cached-model"
             return cachedResult!!
         }
 
         return try {
-            val cropTop = (bitmap.height * 0.35f).toInt().coerceIn(0, bitmap.height - 1)
-            val cropRect = Rect(0, cropTop, bitmap.width, bitmap.height)
-            val cropped = Bitmap.createBitmap(cropRect.width(), cropRect.height(), Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(cropped)
-            canvas.drawBitmap(bitmap, cropRect, Rect(0, 0, cropped.width, cropped.height), null)
-            val scaled = Bitmap.createScaledBitmap(cropped, inputWidth, inputHeight, true)
+            val scaled = Bitmap.createScaledBitmap(bitmap, inputWidth, inputHeight, true)
 
             localInputBuffer.rewind()
             val pixels = IntArray(inputWidth * inputHeight)
@@ -108,14 +116,12 @@ class ModelFloorSegmenter(
                 output = localOutputBuffer.asFloatBuffer(),
                 originalWidth = bitmap.width,
                 originalHeight = bitmap.height,
-                cropTop = cropTop,
             )
             cachedResult = result
             lastInferenceAtMs = nowMs
-            lastMode = "model"
+            lastMode = if (gpuDelegate != null) "gpu-model" else "model"
 
             scaled.recycle()
-            cropped.recycle()
             result
         } catch (exception: Exception) {
             Log.e("ModelFloorSegmenter", "Model inference failed, using heuristic fallback", exception)
@@ -124,11 +130,15 @@ class ModelFloorSegmenter(
         }
     }
 
+    fun close() {
+        interpreter?.close()
+        gpuDelegate?.close()
+    }
+
     private fun decodeSegmentation(
         output: FloatBuffer,
         originalWidth: Int,
         originalHeight: Int,
-        cropTop: Int,
     ): FloorSegmentationResult {
         val targetWidth = 96
         val boundary = IntArray(targetWidth) { -1 }
@@ -138,20 +148,25 @@ class ModelFloorSegmenter(
             return ((y * outputWidth + x) * outputClasses) + classIndex
         }
 
+        fun bestClassAt(y: Int, x: Int): Int {
+            var bestClass = 0
+            var bestScore = Float.NEGATIVE_INFINITY
+            for (classIndex in 0 until outputClasses) {
+                val score = output.get(outputIndex(y, x, classIndex))
+                if (score > bestScore) {
+                    bestScore = score
+                    bestClass = classIndex
+                }
+            }
+            return bestClass
+        }
+
         for (targetX in 0 until targetWidth) {
             val x = ((targetX / (targetWidth - 1).toFloat()) * (outputWidth - 1)).toInt()
             var foundTop = -1
             var streak = 0
             for (y in outputHeight - 1 downTo 0) {
-                var bestClass = 0
-                var bestScore = Float.NEGATIVE_INFINITY
-                for (classIndex in 0 until outputClasses) {
-                    val score = output.get(outputIndex(y, x, classIndex))
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestClass = classIndex
-                    }
-                }
+                val bestClass = bestClassAt(y, x)
                 if (bestClass in walkableClasses) {
                     foundTop = y
                     streak = 0
@@ -164,9 +179,23 @@ class ModelFloorSegmenter(
             }
 
             if (foundTop >= 0) {
-                val yInCrop = (foundTop / (outputHeight - 1).toFloat()) * (originalHeight - cropTop).toFloat()
-                boundary[targetX] = (cropTop + yInCrop).toInt().coerceIn(0, originalHeight - 1)
+                boundary[targetX] = (
+                    (foundTop / (outputHeight - 1).toFloat()) * originalHeight.toFloat()
+                    ).toInt().coerceIn(0, originalHeight - 1)
                 validColumns += 1
+            }
+        }
+
+        val maskWidth = 64
+        val maskHeight = ((originalHeight / originalWidth.toFloat()) * maskWidth)
+            .toInt()
+            .coerceIn(48, 128)
+        val classIds = IntArray(maskWidth * maskHeight)
+        for (maskY in 0 until maskHeight) {
+            val y = ((maskY / (maskHeight - 1).toFloat()) * (outputHeight - 1)).toInt()
+            for (maskX in 0 until maskWidth) {
+                val x = ((maskX / (maskWidth - 1).toFloat()) * (outputWidth - 1)).toInt()
+                classIds[maskY * maskWidth + maskX] = bestClassAt(y, x)
             }
         }
 
@@ -176,6 +205,11 @@ class ModelFloorSegmenter(
             height = originalHeight,
             boundaryYByColumn = boundary,
             confidence = confidence,
+            classMask = SemanticClassMask(
+                width = maskWidth,
+                height = maskHeight,
+                classIds = classIds,
+            ),
         )
     }
 }

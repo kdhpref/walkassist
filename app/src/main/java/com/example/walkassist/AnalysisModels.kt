@@ -67,6 +67,7 @@ data class FloorSegmentationResult(
     val height: Int,
     val boundaryYByColumn: IntArray,
     val confidence: Float,
+    val classMask: SemanticClassMask? = null,
 ) {
     fun boundaryYAt(imageX: Float, imageWidth: Int, imageHeight: Int): Float? {
         if (boundaryYByColumn.isEmpty() || imageWidth <= 0 || imageHeight <= 0) return null
@@ -77,6 +78,12 @@ data class FloorSegmentationResult(
         return (boundaryY / height.toFloat()) * imageHeight.toFloat()
     }
 }
+
+data class SemanticClassMask(
+    val width: Int,
+    val height: Int,
+    val classIds: IntArray,
+)
 
 data class PathMetrics(
     val pathClearMeters: Float?,

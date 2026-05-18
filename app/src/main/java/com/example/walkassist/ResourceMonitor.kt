@@ -60,6 +60,8 @@ class ResourceMonitor(
     private var previousAppCpuSample: AppCpuSample? = null
     private var previousSystemCpuTimes: CpuTimes? = null
     private var previousGpuTimes: GpuTimes? = null
+    private var previousRamSample: RamSample? = null
+    private var previousRamSampleAtMs: Long = 0L
     private val gpuBusyFiles = listOf(
         "/sys/class/kgsl/kgsl-3d0/gpubusy",
         "/sys/class/devfreq/5000000.gpu/gpu_busy",
@@ -210,6 +212,12 @@ class ResourceMonitor(
     )
 
     private fun sampleRam(): RamSample {
+        val now = SystemClock.elapsedRealtime()
+        previousRamSample?.let { sample ->
+            if (now - previousRamSampleAtMs < 30_000L) {
+                return sample
+            }
+        }
         val memoryInfo = Debug.MemoryInfo()
         Debug.getMemoryInfo(memoryInfo)
         val appPssKilobytes = memoryInfo.totalPss.coerceAtLeast(0)
@@ -229,7 +237,10 @@ class ResourceMonitor(
             appPercent = appPercent,
             appMegabytes = appPssKilobytes / 1024,
             systemPercent = systemPercent,
-        )
+        ).also {
+            previousRamSample = it
+            previousRamSampleAtMs = now
+        }
     }
 
     private fun sampleThermalStatus(): String {

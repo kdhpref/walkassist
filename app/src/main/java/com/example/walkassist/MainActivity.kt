@@ -2,11 +2,14 @@
 
 import android.Manifest
 import android.content.Intent
+import android.graphics.Bitmap
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.compose.setContent
@@ -45,16 +48,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.activity.viewModels
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.fragment.app.commitNow
 import androidx.fragment.app.FragmentContainerView
 import androidx.lifecycle.Lifecycle
@@ -84,6 +91,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        configureFullscreenCutout()
         feedbackManager = FeedbackManager(this)
         if (!intent.getBooleanExtra(ArCoreReplayController.EXTRA_RECORD_ON_START, false) &&
             intent.getStringExtra(ArCoreReplayController.EXTRA_PLAYBACK_DATASET_URI).isNullOrBlank()
@@ -128,6 +136,7 @@ class MainActivity : AppCompatActivity() {
                         onOcrClick = ::requestOneShotOcr,
                         onVlmClick = ::requestOneShotVlm,
                         onStopReplayRecording = ::stopArCoreReplayRecording,
+                        onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
                     )
                 }
             }
@@ -255,6 +264,13 @@ class MainActivity : AppCompatActivity() {
         fragment?.stopArCoreReplayRecording()
     }
 
+    private fun setPlaneMeshDebugVisible(visible: Boolean) {
+        val fragment = arFragment
+            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.also(::configureArFragment)
+        fragment?.setPlaneMeshDebugVisible(visible)
+    }
+
     private fun bindArStateToFeedback() {
         feedbackViewModel.startWatchdog()
         lifecycleScope.launch {
@@ -293,6 +309,19 @@ class MainActivity : AppCompatActivity() {
             PackageManager.PERMISSION_GRANTED
     }
 
+    private fun configureFullscreenCutout() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 35) {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+    }
+
     companion object {
         private const val TAG = "WalkAssistMain"
     }
@@ -305,6 +334,7 @@ private fun WalkAssistRootOverlay(
     onOcrClick: () -> Unit,
     onVlmClick: () -> Unit,
     onStopReplayRecording: () -> Unit,
+    onPlaneMeshDebugChanged: (Boolean) -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
     var replayState by remember { mutableStateOf(ArCoreReplayController.currentState()) }
@@ -318,8 +348,10 @@ private fun WalkAssistRootOverlay(
     }
     LaunchedEffect(resourceMonitor) {
         while (true) {
-            resourceUsage = resourceMonitor.sample()
-            delay(1_000L)
+            resourceUsage = withContext(Dispatchers.Default) {
+                resourceMonitor.sample()
+            }
+            delay(2_000L)
         }
     }
     DisposableEffect(Unit) {
@@ -341,6 +373,7 @@ private fun WalkAssistRootOverlay(
                 feedbackState = feedbackState,
                 debugFlags = debugFlags,
                 onDebugFlagsChanged = updateDebugFlags,
+                onPlaneMeshDebugChanged = onPlaneMeshDebugChanged,
             )
             CameraUiControls(
                 onGuideClick = { cameraUiVisible = false },
@@ -654,8 +687,16 @@ private fun MeasurementOverlay(
     feedbackState: FeedbackUiState,
     debugFlags: DebugPipelineFlags,
     onDebugFlagsChanged: (DebugPipelineFlags) -> Unit,
+    onPlaneMeshDebugChanged: (Boolean) -> Unit,
 ) {
     var debugVisible by remember { mutableStateOf(false) }
+
+    LaunchedEffect(debugVisible, debugFlags.arCoreHitTestEnabled) {
+        onPlaneMeshDebugChanged(debugVisible && debugFlags.arCoreHitTestEnabled)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onPlaneMeshDebugChanged(false) }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         ObjectDetectionOverlay(
@@ -758,10 +799,20 @@ private fun MeasurementOverlay(
         )
 
         if (debugVisible) {
-            DepthGridOverlay(
-                cells = state.depthGridCells,
-                modifier = Modifier.fillMaxSize(),
-            )
+            if (debugFlags.floorSegmentationEnabled) {
+                FloorSegmentationOverlay(
+                    classMask = state.semanticClassMask,
+                    columns = state.floorOverlayColumns,
+                    confidence = state.floorOverlayConfidence,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (debugFlags.rawDepthEnabled) {
+                DepthGridOverlay(
+                    cells = state.depthGridCells,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             DebugOverlay(
                 state = state,
                 debugFlags = debugFlags,
@@ -845,6 +896,104 @@ private fun ObjectDetectionOverlay(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun FloorSegmentationOverlay(
+    classMask: SemanticClassMaskOverlay?,
+    columns: List<FloorOverlayColumn>,
+    confidence: Float,
+    modifier: Modifier = Modifier,
+) {
+    if (classMask == null && (columns.size < 2 || confidence <= 0f)) return
+    val classMaskImage = remember(classMask) {
+        classMask?.toImageBitmap()
+    }
+
+    Canvas(modifier = modifier) {
+        if (classMaskImage != null) {
+            drawImage(
+                image = classMaskImage,
+                dstSize = IntSize(
+                    width = size.width.toInt().coerceAtLeast(1),
+                    height = size.height.toInt().coerceAtLeast(1),
+                ),
+            )
+            return@Canvas
+        }
+
+        val sortedColumns = columns.sortedBy { it.xRatio }
+        val floorPath = Path()
+        val first = sortedColumns.first()
+        floorPath.moveTo(
+            first.xRatio.coerceIn(0f, 1f) * size.width,
+            first.boundaryYRatio.coerceIn(0f, 1f) * size.height,
+        )
+        sortedColumns.drop(1).forEach { column ->
+            floorPath.lineTo(
+                column.xRatio.coerceIn(0f, 1f) * size.width,
+                column.boundaryYRatio.coerceIn(0f, 1f) * size.height,
+            )
+        }
+        floorPath.lineTo(size.width, size.height)
+        floorPath.lineTo(0f, size.height)
+        floorPath.close()
+
+        drawPath(
+            path = floorPath,
+            color = Color(0x5536D399),
+        )
+
+        val boundaryPath = Path()
+        boundaryPath.moveTo(
+            first.xRatio.coerceIn(0f, 1f) * size.width,
+            first.boundaryYRatio.coerceIn(0f, 1f) * size.height,
+        )
+        sortedColumns.drop(1).forEach { column ->
+            boundaryPath.lineTo(
+                column.xRatio.coerceIn(0f, 1f) * size.width,
+                column.boundaryYRatio.coerceIn(0f, 1f) * size.height,
+            )
+        }
+        drawPath(
+            path = boundaryPath,
+            color = Color(0xCC5FFFD0),
+            style = Stroke(width = 4f),
+        )
+    }
+}
+
+private fun SemanticClassMaskOverlay.toImageBitmap() =
+    Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+        val pixels = IntArray(width * height) { index ->
+            semanticClassArgb(if (index in classIds.indices) classIds[index] else -1)
+        }
+        setPixels(pixels, 0, width, 0, 0, width, height)
+    }.asImageBitmap()
+
+private fun semanticClassArgb(classId: Int): Int {
+    return when (classId) {
+        0 -> 0x66808080 // road
+        1 -> 0x66F4D03F // sidewalk
+        2 -> 0x668E44AD // building
+        3 -> 0x66A04000 // wall
+        4 -> 0x66D35400 // fence
+        5 -> 0x66E74C3C // pole
+        6 -> 0x66F5B7B1 // traffic light
+        7 -> 0x66F1948A // traffic sign
+        8 -> 0x662ECC71 // vegetation
+        9 -> 0x6658D68D // terrain
+        10 -> 0x665DADE2 // sky
+        11 -> 0x66FF4D6D // person
+        12 -> 0x66FF85A1 // rider
+        13 -> 0x663498DB // car
+        14 -> 0x662E86C1 // truck
+        15 -> 0x662876A6 // bus
+        16 -> 0x661F618D // train
+        17 -> 0x66F39C12 // motorcycle
+        18 -> 0x66F7DC6F // bicycle
+        else -> 0x33000000
     }
 }
 

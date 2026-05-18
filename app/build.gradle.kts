@@ -37,12 +37,12 @@ fun adbExecutablePath(): String {
 
 android {
     namespace = "com.example.walkassist"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.walkassist"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
@@ -91,8 +91,8 @@ android {
 }
 
 dependencies {
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("com.google.ai.edge.litert:litert:1.4.2")
+    implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
 
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.fragment:fragment-ktx:1.8.6")
@@ -105,7 +105,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview:1.6.1")
     implementation("androidx.compose.material3:material3:1.2.0")
     implementation("com.google.ar:core:1.46.0")
-    implementation("com.google.ar.sceneform.ux:sceneform-ux:1.17.1")
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
     implementation("com.naver.maps:map-sdk:3.23.1")
     implementation("com.google.android.gms:play-services-location:21.0.1")
