@@ -143,6 +143,7 @@ class GeminiVlmSceneInterpreter(
     private fun requestGeminiLivePreviewResponse(frame: SpatialFrame): String {
         val done = CountDownLatch(1)
         val textChunks = mutableListOf<String>()
+        val base64Image = frame.bitmap.toBase64Jpeg()
         var audioBytesReceived = 0
         var setupComplete = false
         var failure: Throwable? = null
@@ -165,7 +166,12 @@ class GeminiVlmSceneInterpreter(
                     val message = runCatching { JSONObject(text) }.getOrNull() ?: return
                     if (message.has("setupComplete")) {
                         setupComplete = true
-                        webSocket.send(liveClientContentPayload(GEMINI_LIVE_DEMO_PROMPT))
+                        webSocket.send(
+                            liveClientContentPayload(
+                                text = GEMINI_LIVE_DEMO_PROMPT,
+                                base64Image = base64Image,
+                            ),
+                        )
                         return
                     }
 
@@ -203,6 +209,11 @@ class GeminiVlmSceneInterpreter(
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    if (code != 1000 && textChunks.isEmpty() && audioBytesReceived == 0) {
+                        failure = IllegalStateException(
+                            "Gemini Live websocket closed before response: code=$code reason=$reason",
+                        )
+                    }
                     done.countDown()
                 }
             },
@@ -235,10 +246,14 @@ class GeminiVlmSceneInterpreter(
     private fun liveConfigPayload(): String {
         return JSONObject()
             .put(
-                "config",
+                "setup",
                 JSONObject()
                     .put("model", "models/$model")
-                    .put("responseModalities", JSONArray().put(LIVE_RESPONSE_MODALITY))
+                    .put(
+                        "generationConfig",
+                        JSONObject().put("responseModalities", JSONArray().put(LIVE_RESPONSE_MODALITY)),
+                    )
+                    .put("outputAudioTranscription", JSONObject())
                     .put(
                         "systemInstruction",
                         JSONObject().put(
@@ -257,7 +272,7 @@ class GeminiVlmSceneInterpreter(
             .toString()
     }
 
-    private fun liveClientContentPayload(text: String): String {
+    private fun liveClientContentPayload(text: String, base64Image: String): String {
         return JSONObject()
             .put(
                 "clientContent",
@@ -269,7 +284,16 @@ class GeminiVlmSceneInterpreter(
                                 .put("role", "user")
                                 .put(
                                     "parts",
-                                    JSONArray().put(JSONObject().put("text", text)),
+                                    JSONArray()
+                                        .put(
+                                            JSONObject().put(
+                                                "inlineData",
+                                                JSONObject()
+                                                    .put("mimeType", "image/jpeg")
+                                                    .put("data", base64Image),
+                                            ),
+                                        )
+                                        .put(JSONObject().put("text", text)),
                                 ),
                         ),
                     )
@@ -342,12 +366,12 @@ class GeminiVlmSceneInterpreter(
         private const val DEFAULT_MODEL = "gemini-2.5-flash-lite"
         private const val MAX_IMAGE_SIDE = 640
         private const val LIVE_TIMEOUT_SECONDS = 25L
-        private const val LIVE_RESPONSE_MODALITY = "TEXT"
+        private const val LIVE_RESPONSE_MODALITY = "AUDIO"
         private val liveHttpClient = OkHttpClient.Builder()
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .build()
         private const val GEMINI_LIVE_DEMO_PROMPT =
-            "Describe this image in one short Korean sentence for a Gemini Live API connection test."
+            "현재 카메라 장면에서 보행자가 바로 주의해야 할 점을 한국어 한 문장으로 말해줘."
         private const val GEMINI_IMAGE_DESCRIPTION_PROMPT = """
 Describe only what is visible in the image.
 If readable signs or text are visible, summarize them naturally.

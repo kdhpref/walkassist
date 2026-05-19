@@ -55,9 +55,10 @@ the user presses the VLM button.
 
 When Gemini 3.1 Flash Live Preview is selected, the app runs a minimal Live API
 WebSocket demo: it opens the official `BidiGenerateContent` endpoint, sends the
-initial `config` message, sends one short text turn through `clientContent`
-with `turnComplete=true`, and displays the returned text. It does not keep a
-continuous session open and does not use the microphone.
+initial `setup` message with audio output transcription enabled, then sends the
+current camera image plus one short text turn through `clientContent`. It
+displays the returned output transcription, does not keep a continuous session
+open, and does not use the microphone.
 
 Put the API key in `local.properties`:
 
