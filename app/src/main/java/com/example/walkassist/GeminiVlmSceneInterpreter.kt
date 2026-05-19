@@ -8,6 +8,13 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -15,6 +22,7 @@ class GeminiVlmSceneInterpreter(
     private val apiKey: String = BuildConfig.GEMINI_API_KEY,
     private val model: String = DEFAULT_MODEL,
 ) : VlmSceneInterpreter {
+
     fun prepareForUse(): VlmModelPreparationStatus {
         val configured = apiKey.isNotBlank()
         return VlmModelPreparationStatus(
@@ -41,7 +49,11 @@ class GeminiVlmSceneInterpreter(
         }
 
         val responseText = runCatching {
-            requestGeminiDescription(frame)
+            if (model == GEMINI_3_1_FLASH_LIVE_MODEL) {
+                requestGeminiLivePreviewResponse(frame)
+            } else {
+                requestGeminiDescription(frame)
+            }
         }.onFailure {
             Log.w(TAG, "Gemini VLM request failed", it)
         }.getOrNull()
@@ -49,16 +61,20 @@ class GeminiVlmSceneInterpreter(
         if (responseText.isNullOrBlank()) return null
 
         return VlmSceneInterpretation(
-            modelName = "$model-image-description",
+            modelName = if (model == GEMINI_3_1_FLASH_LIVE_MODEL) "$model-live-demo" else "$model-image-description",
             schemaVersion = 1,
             risk = VlmWalkingRisk.UNKNOWN,
             suggestedAction = VlmSuggestedAction.UNKNOWN,
             confidence = 0.5f,
             pathSummary = sanitizeGeminiUserText(
                 text = responseText.twoOrThreeSentences(),
-                fallback = "The image description is unavailable.",
+                fallback = "Gemini response is unavailable.",
             ),
-            evidence = emptyList(),
+            evidence = if (model == GEMINI_3_1_FLASH_LIVE_MODEL) {
+                listOf("gemini_live_websocket")
+            } else {
+                emptyList()
+            },
             shouldOverridePrimary = false,
         )
     }
@@ -124,6 +140,144 @@ class GeminiVlmSceneInterpreter(
             ?: throw IllegalStateException("Gemini response has no text part")
     }
 
+    private fun requestGeminiLivePreviewResponse(frame: SpatialFrame): String {
+        val done = CountDownLatch(1)
+        val textChunks = mutableListOf<String>()
+        var audioBytesReceived = 0
+        var setupComplete = false
+        var failure: Throwable? = null
+        var socket: WebSocket? = null
+
+        val request = Request.Builder()
+            .url("$LIVE_API_BASE?key=$apiKey")
+            .build()
+
+        socket = liveHttpClient.newWebSocket(
+            request,
+            object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    Log.d(TAG, "Gemini Live demo websocket opened http=${response.code}")
+                    webSocket.send(liveConfigPayload())
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    Log.d(TAG, "Gemini Live demo received=${text.take(500)}")
+                    val message = runCatching { JSONObject(text) }.getOrNull() ?: return
+                    if (message.has("setupComplete")) {
+                        setupComplete = true
+                        webSocket.send(liveClientContentPayload(GEMINI_LIVE_DEMO_PROMPT))
+                        return
+                    }
+
+                    val serverContent = message.optJSONObject("serverContent") ?: return
+                    serverContent.optJSONObject("modelTurn")
+                        ?.optJSONArray("parts")
+                        ?.let { parts ->
+                            for (index in 0 until parts.length()) {
+                                val part = parts.optJSONObject(index) ?: continue
+                                part.optString("text")
+                                    .takeIf { it.isNotBlank() }
+                                    ?.let(textChunks::add)
+                                part.optJSONObject("inlineData")
+                                    ?.optString("data")
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { audioBytesReceived += Base64.decode(it, Base64.DEFAULT).size }
+                            }
+                        }
+                    serverContent.optJSONObject("outputTranscription")
+                        ?.optString("text")
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let(textChunks::add)
+
+                    if (serverContent.optBoolean("turnComplete", false)) {
+                        done.countDown()
+                        webSocket.close(1000, "demo_done")
+                    }
+                }
+
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    failure = response?.let {
+                        IllegalStateException("Gemini Live HTTP ${it.code} ${it.message}", t)
+                    } ?: t
+                    done.countDown()
+                }
+
+                override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                    done.countDown()
+                }
+            },
+        )
+
+        val completed = done.await(LIVE_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        if (!completed) {
+            socket?.cancel()
+            throw IllegalStateException(
+                if (setupComplete) {
+                    "Gemini Live API timed out after setup"
+                } else {
+                    "Gemini Live API setup timed out"
+                },
+            )
+        }
+        failure?.let { throw it }
+
+        return textChunks.joinToString(" ")
+            .trim()
+            .ifBlank {
+                if (audioBytesReceived > 0) {
+                    "Gemini Live API connected and returned ${audioBytesReceived} bytes of audio."
+                } else {
+                    throw IllegalStateException("Gemini Live response has no text or audio part")
+                }
+            }
+    }
+
+    private fun liveConfigPayload(): String {
+        return JSONObject()
+            .put(
+                "config",
+                JSONObject()
+                    .put("model", "models/$model")
+                    .put("responseModalities", JSONArray().put(LIVE_RESPONSE_MODALITY))
+                    .put(
+                        "systemInstruction",
+                        JSONObject().put(
+                            "parts",
+                            JSONArray().put(
+                                JSONObject().put(
+                                    "text",
+                                    "You are a walking-assistance helper. " +
+                                        "Use the camera scene to help the user walk safely. " +
+                                        "Answer briefly in Korean with only useful navigation or safety information.",
+                                ),
+                            ),
+                        ),
+                    ),
+            )
+            .toString()
+    }
+
+    private fun liveClientContentPayload(text: String): String {
+        return JSONObject()
+            .put(
+                "clientContent",
+                JSONObject()
+                    .put(
+                        "turns",
+                        JSONArray().put(
+                            JSONObject()
+                                .put("role", "user")
+                                .put(
+                                    "parts",
+                                    JSONArray().put(JSONObject().put("text", text)),
+                                ),
+                        ),
+                    )
+                    .put("turnComplete", true),
+            )
+            .toString()
+    }
+
     private fun sanitizeGeminiUserText(text: String, fallback: String): String {
         val cleaned = VlmWalkingAnnouncementFormatter.sanitizeForWalkingTts(
             text = text,
@@ -135,7 +289,7 @@ class GeminiVlmSceneInterpreter(
     private fun String.twoOrThreeSentences(): String {
         val normalized = trim().replace(Regex("\\s+"), " ")
         if (normalized.isBlank()) return normalized
-        val sentences = Regex("[^.!?。！？]+[.!?。！？]?")
+        val sentences = Regex("""[^.!?。！？]+[.!?。！？]?""")
             .findAll(normalized)
             .map { it.value.trim() }
             .filter { it.isNotBlank() }
@@ -182,12 +336,22 @@ class GeminiVlmSceneInterpreter(
     companion object {
         private const val TAG = "GeminiVlm"
         private const val API_BASE = "https://generativelanguage.googleapis.com/v1beta"
+        private const val LIVE_API_BASE =
+            "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
+        const val GEMINI_3_1_FLASH_LIVE_MODEL = "gemini-3.1-flash-live-preview"
         private const val DEFAULT_MODEL = "gemini-2.5-flash-lite"
         private const val MAX_IMAGE_SIDE = 640
+        private const val LIVE_TIMEOUT_SECONDS = 25L
+        private const val LIVE_RESPONSE_MODALITY = "TEXT"
+        private val liveHttpClient = OkHttpClient.Builder()
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .build()
+        private const val GEMINI_LIVE_DEMO_PROMPT =
+            "Describe this image in one short Korean sentence for a Gemini Live API connection test."
         private const val GEMINI_IMAGE_DESCRIPTION_PROMPT = """
-화면에 비친 이미지 자체만 보고 장면을 한국어로 짧게 묘사해 주세요.
-실제로 보이는 표지판이나 읽을 수 있는 글자들이 있다면 자연스럽게 요약해 주세요.
-답변은 길어도 두 문장 또는 세 문장으로만 작성해 주세요.
+Describe only what is visible in the image.
+If readable signs or text are visible, summarize them naturally.
+Answer in Korean in no more than two short sentences.
 """
         private val PRIVATE_HINT_TERMS = listOf(
             "yolo",

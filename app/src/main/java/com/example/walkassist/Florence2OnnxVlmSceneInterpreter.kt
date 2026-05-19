@@ -19,7 +19,7 @@ class Florence2OnnxVlmSceneInterpreter(
             isAvailable = status.isAvailable,
             isFallbackLikely = !status.isAvailable,
             explanation = if (status.isAvailable) {
-                "Florence-2 ONNX files are present on device."
+                "Florence-2 ONNX files are present on device. NNAPI acceleration is tried first at runtime."
             } else {
                 "Missing ${status.missingFiles.size} Florence-2 file(s). Download them from VLM settings."
             },
@@ -49,16 +49,22 @@ class Florence2OnnxVlmSceneInterpreter(
             )
         }
 
+        val activeGenerator = getOrCreateGenerator(status)
         val caption = runCatching {
-            getOrCreateGenerator(status).generateCaption(frame.bitmap)
+            activeGenerator.generateCaption(frame.bitmap)
         }.onFailure {
             Log.w(TAG, "Florence-2 ${variant.displayName} generation failed", it)
         }.getOrNull()
 
         if (!caption.isNullOrBlank()) {
+            val koreanSummary = Florence2KoreanSceneFormatter.format(
+                florenceCaption = caption,
+                primaryAnalysis = primaryAnalysis,
+                crosswalk = crosswalk,
+            )
             val summary = VlmWalkingAnnouncementFormatter.sanitizeForWalkingTts(
-                text = caption.twoOrThreeSentences(),
-                fallback = "Florence-2 image description is unavailable.",
+                text = koreanSummary,
+                fallback = "Florence-2 이미지 설명을 사용할 수 없습니다.",
             )
             return VlmSceneInterpretation(
                 modelName = variant.modelName,
@@ -67,7 +73,11 @@ class Florence2OnnxVlmSceneInterpreter(
                 suggestedAction = VlmSuggestedAction.UNKNOWN,
                 confidence = 0.5f,
                 pathSummary = summary,
-                evidence = listOf("local_onnx=${variant.displayName}"),
+                evidence = listOf(
+                    "local_onnx=${variant.displayName}",
+                    "onnx_backend=${activeGenerator.executionBackendSummary}",
+                    "florence_caption=${caption.take(120)}",
+                ),
                 shouldOverridePrimary = false,
             )
         }
@@ -79,7 +89,10 @@ class Florence2OnnxVlmSceneInterpreter(
             suggestedAction = VlmSuggestedAction.UNKNOWN,
             confidence = 0.1f,
             pathSummary = "Florence-2 ${variant.displayName} image description failed.",
-            evidence = listOf("model_dir=${status.rootDirectory.absolutePath}"),
+            evidence = listOf(
+                "model_dir=${status.rootDirectory.absolutePath}",
+                "onnx_backend=${activeGenerator.executionBackendSummary}",
+            ),
             shouldOverridePrimary = false,
         )
     }
@@ -91,18 +104,6 @@ class Florence2OnnxVlmSceneInterpreter(
         ).also {
             generator = it
         }
-    }
-
-    private fun String.twoOrThreeSentences(): String {
-        val normalized = trim().replace(Regex("\\s+"), " ")
-        if (normalized.isBlank()) return normalized
-        val sentences = Regex("[^.!?。！？]+[.!?。！？]?")
-            .findAll(normalized)
-            .map { it.value.trim() }
-            .filter { it.isNotBlank() }
-            .take(3)
-            .toList()
-        return sentences.joinToString(" ").ifBlank { normalized }
     }
 
     override fun close() {

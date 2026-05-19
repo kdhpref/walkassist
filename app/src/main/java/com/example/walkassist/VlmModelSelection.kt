@@ -16,6 +16,11 @@ enum class VlmModelOption(
         displayName = "Gemini API",
         florenceVariant = null,
     ),
+    GEMINI_3_1_FLASH_LIVE_API(
+        preferenceValue = "gemini_3_1_flash_live_api",
+        displayName = "Gemini 3.1 Flash Live Preview",
+        florenceVariant = null,
+    ),
     FLORENCE2_INT4(
         preferenceValue = "florence2_int4",
         displayName = "Florence-2 INT4",

@@ -6,6 +6,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Build
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import com.example.walkassist.feedback.core.FeedbackAlertLevel
 import java.util.Locale
@@ -32,6 +33,24 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
             return
         }
         isReady = true
+        tts?.setOnUtteranceProgressListener(
+            object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) = Unit
+
+                override fun onDone(utteranceId: String?) {
+                    abandonAudioFocus()
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    abandonAudioFocus()
+                }
+
+                override fun onError(utteranceId: String?, errorCode: Int) {
+                    abandonAudioFocus()
+                }
+            },
+        )
     }
 
     fun speak(message: String, level: FeedbackAlertLevel) {

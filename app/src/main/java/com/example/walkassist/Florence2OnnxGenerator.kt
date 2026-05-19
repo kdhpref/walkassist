@@ -1,15 +1,20 @@
 package com.example.walkassist
 
+import android.util.Log
+import android.os.SystemClock
 import ai.onnxruntime.NodeInfo
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OnnxTensorLike
 import ai.onnxruntime.OrtEnvironment
+import ai.onnxruntime.OrtException
 import ai.onnxruntime.OrtSession
 import ai.onnxruntime.TensorInfo
+import ai.onnxruntime.providers.NNAPIFlags
 import java.io.Closeable
 import java.io.File
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
+import java.util.EnumSet
 import kotlin.math.max
 
 class Florence2OnnxGenerator(
@@ -17,31 +22,54 @@ class Florence2OnnxGenerator(
     private val variant: Florence2OnnxVariant,
 ) : Closeable {
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
-    private val sessionOptions = OrtSession.SessionOptions()
+    private val sessionOptions = mutableListOf<OrtSession.SessionOptions>()
+    private val backendSelections = mutableListOf<String>()
     private val embedSession = createSession("onnx/embed_tokens_${variant.onnxSuffix}.onnx")
     private val visionSession = createSession("onnx/vision_encoder_${variant.onnxSuffix}.onnx")
     private val encoderSession = createSession("onnx/encoder_model_${variant.onnxSuffix}.onnx")
     private val decoderSession = createSession("onnx/decoder_model_merged_${variant.onnxSuffix}.onnx")
     private val tokenizer = Florence2Tokenizer(modelRoot)
 
+    val executionBackendSummary: String
+        get() = backendSelections.joinToString(", ")
+
     fun generateCaption(bitmap: android.graphics.Bitmap): String {
+        val startMs = SystemClock.elapsedRealtime()
         val promptIds = tokenizer.encode(CAPTION_PROMPT)
+        val promptStartMs = SystemClock.elapsedRealtime()
         val promptEmbeds = encodeText(promptIds)
+        val imageStartMs = SystemClock.elapsedRealtime()
         val imageFeatures = encodeImage(bitmap)
+        val encoderInputStartMs = SystemClock.elapsedRealtime()
         val encoderInputs = concatImageAndTextEmbeds(imageFeatures, promptEmbeds)
         val encoderAttentionMask = LongArray(encoderInputs.sequenceLength) { 1L }
+        val encoderStartMs = SystemClock.elapsedRealtime()
         val encoderHiddenStates = encodeCombinedInputs(
             inputsEmbeds = encoderInputs.data,
             sequenceLength = encoderInputs.sequenceLength,
             attentionMask = encoderAttentionMask,
         )
 
+        val decoderStartMs = SystemClock.elapsedRealtime()
         val generatedIds = generateTokenIds(
             encoderHiddenStates = encoderHiddenStates,
             encoderSequenceLength = encoderInputs.sequenceLength,
             encoderAttentionMask = encoderAttentionMask,
         )
-        return tokenizer.decode(generatedIds)
+        val decodeStartMs = SystemClock.elapsedRealtime()
+        val caption = tokenizer.decode(generatedIds)
+        val endMs = SystemClock.elapsedRealtime()
+        Log.i(
+            TAG,
+            "Florence-2 ${variant.displayName} timings backend=[$executionBackendSummary] " +
+                "promptEmbedMs=${imageStartMs - promptStartMs} " +
+                "imageMs=${encoderInputStartMs - imageStartMs} " +
+                "encoderMs=${decoderStartMs - encoderStartMs} " +
+                "decoderMs=${decodeStartMs - decoderStartMs} " +
+                "decodeMs=${endMs - decodeStartMs} " +
+                "totalMs=${endMs - startMs} tokens=${generatedIds.size}",
+        )
+        return caption
     }
 
     private fun encodeText(inputIds: LongArray): Tensor3D {
@@ -242,7 +270,58 @@ class Florence2OnnxGenerator(
 
     private fun createSession(relativePath: String): OrtSession {
         val modelFile = File(modelRoot, relativePath.replace('/', File.separatorChar))
-        return env.createSession(modelFile.absolutePath, sessionOptions)
+        listOf(NnapiMode.STRICT, NnapiMode.MIXED).forEach { nnapiMode ->
+            val acceleratorOptions = runCatching {
+                createSessionOptions(nnapiMode = nnapiMode)
+            }.onFailure { error ->
+                Log.w(TAG, "NNAPI $nnapiMode options are unavailable for $relativePath; trying next backend.", error)
+            }.getOrNull()
+
+            if (acceleratorOptions != null) {
+                runCatching {
+                    env.createSession(modelFile.absolutePath, acceleratorOptions)
+                }.onSuccess {
+                    sessionOptions += acceleratorOptions
+                    backendSelections += "${modelFile.name}=nnapi_${nnapiMode.label}"
+                    Log.i(TAG, "Created ${modelFile.name} with NNAPI ${nnapiMode.label}.")
+                    return it
+                }.onFailure { error ->
+                    acceleratorOptions.close()
+                    Log.w(TAG, "NNAPI ${nnapiMode.label} session failed for $relativePath; trying next backend.", error)
+                }
+            }
+        }
+
+        val cpuOptions = createSessionOptions(nnapiMode = null)
+        return try {
+            env.createSession(modelFile.absolutePath, cpuOptions).also {
+                sessionOptions += cpuOptions
+                backendSelections += "${modelFile.name}=cpu"
+                Log.i(TAG, "Created ${modelFile.name} with CPU fallback.")
+            }
+        } catch (error: OrtException) {
+            cpuOptions.close()
+            throw error
+        }
+    }
+
+    private fun createSessionOptions(nnapiMode: NnapiMode?): OrtSession.SessionOptions {
+        return OrtSession.SessionOptions().apply {
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            setExecutionMode(OrtSession.SessionOptions.ExecutionMode.SEQUENTIAL)
+            setInterOpNumThreads(1)
+            setIntraOpNumThreads(cpuFallbackThreadCount())
+            when (nnapiMode) {
+                NnapiMode.STRICT -> addNnapi(NNAPI_STRICT_ACCELERATOR_FLAGS)
+                NnapiMode.MIXED -> addNnapi(NNAPI_MIXED_ACCELERATOR_FLAGS)
+                null -> Unit
+            }
+        }
+    }
+
+    private fun cpuFallbackThreadCount(): Int {
+        val cores = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+        return cores.coerceAtMost(4)
     }
 
     private fun tensor3D(tensor: OnnxTensor): Tensor3D {
@@ -283,7 +362,8 @@ class Florence2OnnxGenerator(
         visionSession.close()
         encoderSession.close()
         decoderSession.close()
-        sessionOptions.close()
+        sessionOptions.forEach { it.close() }
+        sessionOptions.clear()
     }
 
     private data class Tensor3D(
@@ -292,10 +372,26 @@ class Florence2OnnxGenerator(
         val hiddenSize: Int,
     )
 
+    private enum class NnapiMode(val label: String) {
+        STRICT("strict"),
+        MIXED("mixed"),
+    }
+
     companion object {
-        private const val CAPTION_PROMPT = "Describe with a paragraph what is shown in the image."
+        private const val TAG = "Florence2OnnxGenerator"
+        private const val CAPTION_PROMPT =
+            "이미지에 보이는 보행 장면을 한국어 두 문장으로 묘사하세요. 사람, 차량, 문, 계단, 턱, 표지판, 통로 상태를 구체적으로 말하세요."
         private const val HIDDEN_SIZE = 768
         private const val VOCAB_SIZE = 51289
         private const val MAX_NEW_TOKENS = 64
+        private val NNAPI_STRICT_ACCELERATOR_FLAGS: EnumSet<NNAPIFlags> = EnumSet.of(
+            NNAPIFlags.USE_FP16,
+            NNAPIFlags.USE_NCHW,
+            NNAPIFlags.CPU_DISABLED,
+        )
+        private val NNAPI_MIXED_ACCELERATOR_FLAGS: EnumSet<NNAPIFlags> = EnumSet.of(
+            NNAPIFlags.USE_FP16,
+            NNAPIFlags.USE_NCHW,
+        )
     }
 }

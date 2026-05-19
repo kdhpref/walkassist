@@ -101,8 +101,11 @@ class MainActivity : AppCompatActivity() {
         prepareVlmModelAtStartup()
         bindArStateToFeedback()
 
-        if (!hasCameraPermission()) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 100)
+        val missingStartupPermissions = buildList {
+            if (!hasCameraPermission()) add(Manifest.permission.CAMERA)
+        }
+        if (missingStartupPermissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missingStartupPermissions.toTypedArray(), 100)
         }
 
         val root = FrameLayout(this).apply {
@@ -241,7 +244,6 @@ class MainActivity : AppCompatActivity() {
             )
             return
         }
-
         val fragment = arFragment
             ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
                 ?.also(::configureArFragment)

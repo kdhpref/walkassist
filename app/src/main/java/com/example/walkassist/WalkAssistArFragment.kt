@@ -191,6 +191,8 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var cameraTextureId = 0
     private var viewportWidth = 1
     private var viewportHeight = 1
+    @Volatile
+    private var oneShotVlmRequestedAtMs: Long = 0L
 
     fun requestOneShotOcr() {
         if (oneShotOcrRequested.get() || oneShotOcrInFlight.get()) {
@@ -201,10 +203,12 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     }
 
     fun requestOneShotVlm() {
+        Log.d(TAG, "VLM button requested")
         if (oneShotVlmRequested.get() || oneShotVlmInFlight.get()) {
             dispatchOneShotVlmResult("이미 앞쪽 장면을 분석 중입니다. 잠시만 기다려 주세요.")
             return
         }
+        oneShotVlmRequestedAtMs = SystemClock.elapsedRealtime()
         oneShotVlmRequested.set(true)
     }
 
@@ -895,6 +899,12 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     )
                     vlmStarted = true
                 } else if (shouldRunVlm) {
+                    appendVlmInvocationLog(
+                        success = false,
+                        resultModelName = null,
+                        risk = null,
+                        errorMessage = "vlm_pipeline_disabled",
+                    )
                     dispatchOneShotVlmResult("디버그 설정에서 VLM 파이프라인이 꺼져 있습니다.")
                 }
                 if (shouldRunOcr) {
@@ -1020,6 +1030,12 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 if (shouldRunVlm) {
                     oneShotVlmRequested.set(false)
                     oneShotVlmInFlight.set(false)
+                    appendVlmInvocationLog(
+                        success = false,
+                        resultModelName = null,
+                        risk = null,
+                        errorMessage = "frame_processing_failed",
+                    )
                     dispatchOneShotVlmResult("장면 분석에 실패했습니다. 잠시 멈춰 주세요.")
                 }
                 if (shouldRunOcr && !ocrStarted) {
@@ -1061,6 +1077,26 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         }
     }
 
+    private fun appendVlmInvocationLog(
+        success: Boolean,
+        resultModelName: String?,
+        risk: VlmWalkingRisk?,
+        errorMessage: String?,
+    ) {
+        val appContext = requireContext().applicationContext
+        val requestedAtMs = oneShotVlmRequestedAtMs.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
+        VlmInvocationLogger.append(
+            context = appContext,
+            selectedModelName = WalkAssistSettings.vlmModelOption(appContext).displayName,
+            resultModelName = resultModelName,
+            latencyMs = SystemClock.elapsedRealtime() - requestedAtMs,
+            success = success,
+            risk = risk,
+            errorMessage = errorMessage,
+        )
+        oneShotVlmRequestedAtMs = 0L
+    }
+
     private fun startBackgroundVlmCaption(
         bitmap: Bitmap,
         spatialFrame: SpatialFrame,
@@ -1076,22 +1112,50 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             bitmap.copy(Bitmap.Config.ARGB_8888, false)
         } catch (_: Exception) {
             oneShotVlmInFlight.set(false)
+            val appContext = requireContext().applicationContext
+            val requestedAtMs = oneShotVlmRequestedAtMs.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
+            VlmInvocationLogger.append(
+                context = appContext,
+                selectedModelName = WalkAssistSettings.vlmModelOption(appContext).displayName,
+                resultModelName = null,
+                latencyMs = SystemClock.elapsedRealtime() - requestedAtMs,
+                success = false,
+                risk = null,
+                errorMessage = "bitmap_copy_failed",
+            )
+            oneShotVlmRequestedAtMs = 0L
             return
         }
         val localVlmInterpreter = vlmSceneInterpreter
         val modelFrame = spatialFrame.copy(bitmap = vlmBitmap)
+        val appContext = requireContext().applicationContext
+        val selectedModelName = WalkAssistSettings.vlmModelOption(appContext).displayName
+        val requestedAtMs = oneShotVlmRequestedAtMs.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
         vlmExecutor.execute {
-            val vlmStartedAtMs = SystemClock.elapsedRealtime()
+            val inferenceStartedAtMs = SystemClock.elapsedRealtime()
             try {
-                Log.d(TAG, "VLM invoke manual=true timestampMs=${modelFrame.timestampMillis}")
+            Log.d(TAG, "VLM invoke manual=true model=$selectedModelName timestampMs=${modelFrame.timestampMillis}")
                 val interpretation = localVlmInterpreter.interpret(
                     frame = modelFrame,
                     primaryAnalysis = primaryAnalysis,
                     crosswalk = crosswalk,
                 )
+                val buttonToAnswerLatencyMs = SystemClock.elapsedRealtime() - requestedAtMs
                 Log.d(
                     TAG,
-                    "VLM result manual=true elapsedMs=${SystemClock.elapsedRealtime() - vlmStartedAtMs} risk=${interpretation?.risk}",
+                    "VLM result manual=true model=${interpretation?.modelName ?: selectedModelName} " +
+                        "buttonToAnswerLatencyMs=$buttonToAnswerLatencyMs " +
+                        "inferenceElapsedMs=${SystemClock.elapsedRealtime() - inferenceStartedAtMs} " +
+                        "risk=${interpretation?.risk}",
+                )
+                VlmInvocationLogger.append(
+                    context = appContext,
+                    selectedModelName = selectedModelName,
+                    resultModelName = interpretation?.modelName,
+                    latencyMs = buttonToAnswerLatencyMs,
+                    success = interpretation != null,
+                    risk = interpretation?.risk,
+                    errorMessage = if (interpretation == null) "empty_interpretation" else null,
                 )
                 if (interpretation != null) {
                     lastVlmVisionState = VlmVisionState(
@@ -1101,8 +1165,19 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     dispatchOneShotVlmResult(interpretation.pathSummary)
                 }
             } catch (error: Exception) {
+                val buttonToAnswerLatencyMs = SystemClock.elapsedRealtime() - requestedAtMs
+                VlmInvocationLogger.append(
+                    context = appContext,
+                    selectedModelName = selectedModelName,
+                    resultModelName = null,
+                    latencyMs = buttonToAnswerLatencyMs,
+                    success = false,
+                    risk = null,
+                    errorMessage = error.message ?: error::class.java.simpleName,
+                )
                 Log.w(TAG, "Background VLM caption failed", error)
             } finally {
+                oneShotVlmRequestedAtMs = 0L
                 oneShotVlmInFlight.set(false)
                 vlmBitmap.recycle()
             }

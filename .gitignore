@@ -12,6 +12,7 @@
 .DS_Store
 /build
 /captures
+perf-artifacts/
 .externalNativeBuild
 .cxx
 local.properties

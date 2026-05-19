@@ -4,7 +4,6 @@ import android.content.Context
 
 object WalkAssistSettings {
     private const val PREF_NAME = "walkassist_settings"
-    private const val KEY_GEMMA_3N_MODEL_PATH = "gemma_3n_model_path"
     private const val KEY_ARCORE_TTS_ENABLED = "arcore_tts_enabled"
     private const val KEY_DEBUG_YOLO_ENABLED = "debug_yolo_enabled"
     private const val KEY_DEBUG_FLOOR_SEGMENTATION_ENABLED = "debug_floor_segmentation_enabled"
@@ -15,30 +14,7 @@ object WalkAssistSettings {
     private const val KEY_DEBUG_VLM_ENABLED = "debug_vlm_enabled"
     private const val KEY_VLM_MODEL_OPTION = "vlm_model_option"
 
-    const val GEMMA_3N_MODEL_REPOSITORY = "google/gemma-3n-E2B-it-litert-lm"
-    const val DEFAULT_GEMMA_3N_MODEL_FILENAME = "gemma-3n-E2B-it-int4.litertlm"
-
     fun preferences(context: Context) = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-
-    fun gemma3nModelPath(context: Context): String {
-        val storedPath = preferences(context).getString(KEY_GEMMA_3N_MODEL_PATH, "").orEmpty()
-        return storedPath.ifBlank {
-            context.getExternalFilesDir("models")
-                ?.resolve(DEFAULT_GEMMA_3N_MODEL_FILENAME)
-                ?.absolutePath
-                ?: "/sdcard/Android/data/${context.packageName}/files/models/$DEFAULT_GEMMA_3N_MODEL_FILENAME"
-        }
-    }
-
-    fun setGemma3nModelPath(
-        context: Context,
-        modelPath: String,
-    ) {
-        preferences(context)
-            .edit()
-            .putString(KEY_GEMMA_3N_MODEL_PATH, modelPath)
-            .apply()
-    }
 
     fun vlmModelOption(context: Context): VlmModelOption {
         val storedValue = preferences(context).getString(KEY_VLM_MODEL_OPTION, "").orEmpty()
