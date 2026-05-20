@@ -12,11 +12,18 @@ import com.example.walkassist.feedback.core.FeedbackAlertLevel
 import java.util.Locale
 
 class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
+    private data class PendingSpeech(
+        val message: String,
+        val level: FeedbackAlertLevel,
+        val queueMode: Int,
+    )
+
     private val appContext = context.applicationContext
     private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var tts: TextToSpeech? = TextToSpeech(appContext, this)
     private var audioFocusRequest: AudioFocusRequest? = null
     private var isReady = false
+    private var pendingSpeech: PendingSpeech? = null
 
     override fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) {
@@ -51,18 +58,39 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
                 }
             },
         )
+        pendingSpeech?.let { pending ->
+            pendingSpeech = null
+            speak(
+                message = pending.message,
+                level = pending.level,
+                queueMode = pending.queueMode,
+            )
+        }
     }
 
-    fun speak(message: String, level: FeedbackAlertLevel) {
-        if (!isReady || message.isBlank()) return
+    fun speak(
+        message: String,
+        level: FeedbackAlertLevel,
+        queueMode: Int = TextToSpeech.QUEUE_FLUSH,
+    ) {
+        if (message.isBlank()) return
+        if (!isReady) {
+            pendingSpeech = PendingSpeech(message, level, queueMode)
+            Log.d(TAG, "TTS not ready; queued pending speech")
+            return
+        }
 
         requestAudioFocus()
         tts?.setPitch(pitchFor(level))
         tts?.setSpeechRate(rateFor(level))
-        tts?.speak(message, TextToSpeech.QUEUE_FLUSH, null, UTTERANCE_ID)
+        val result = tts?.speak(message, queueMode, null, UTTERANCE_ID)
+        if (result != TextToSpeech.SUCCESS) {
+            Log.w(TAG, "TTS speak failed result=$result")
+        }
     }
 
     fun release() {
+        pendingSpeech = null
         tts?.stop()
         tts?.shutdown()
         tts = null

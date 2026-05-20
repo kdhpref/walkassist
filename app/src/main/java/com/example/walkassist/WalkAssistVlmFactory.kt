@@ -7,7 +7,7 @@ object WalkAssistVlmFactory {
         return when (val option = WalkAssistSettings.vlmModelOption(context)) {
             VlmModelOption.GEMINI_API -> GeminiVlmSceneInterpreter()
             VlmModelOption.GEMINI_3_1_FLASH_LIVE_API -> GeminiVlmSceneInterpreter(
-                model = GeminiVlmSceneInterpreter.GEMINI_3_1_FLASH_LIVE_MODEL,
+                model = GeminiVlmSceneInterpreter.GEMINI_FLASH_LIVE_MODEL,
             )
             VlmModelOption.FLORENCE2_INT4,
             VlmModelOption.FLORENCE2_INT8,
@@ -22,7 +22,7 @@ object WalkAssistVlmFactory {
         return when (val option = WalkAssistSettings.vlmModelOption(context)) {
             VlmModelOption.GEMINI_API -> GeminiVlmSceneInterpreter().prepareForUse()
             VlmModelOption.GEMINI_3_1_FLASH_LIVE_API -> GeminiVlmSceneInterpreter(
-                model = GeminiVlmSceneInterpreter.GEMINI_3_1_FLASH_LIVE_MODEL,
+                model = GeminiVlmSceneInterpreter.GEMINI_FLASH_LIVE_MODEL,
             ).prepareForUse()
             VlmModelOption.FLORENCE2_INT4,
             VlmModelOption.FLORENCE2_INT8,

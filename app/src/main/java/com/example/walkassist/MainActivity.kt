@@ -88,6 +88,7 @@ class MainActivity : AppCompatActivity() {
     private val arFeedbackMapper = ArFeedbackMapper()
     private lateinit var feedbackManager: FeedbackManager
     private var arFragment: WalkAssistArFragment? = null
+    private var liveVlmActive by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -138,6 +139,7 @@ class MainActivity : AppCompatActivity() {
                         feedbackState = feedbackState,
                         onOcrClick = ::requestOneShotOcr,
                         onVlmClick = ::requestOneShotVlm,
+                        vlmButtonText = liveVlmButtonText(),
                         onStopReplayRecording = ::stopArCoreReplayRecording,
                         onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
                     )
@@ -179,7 +181,11 @@ class MainActivity : AppCompatActivity() {
             feedbackManager.provideFeedback(
                 message = message,
                 level = FeedbackAlertLevel.CAUTION,
+                prioritySpeech = true,
             )
+        }
+        fragment.onLiveVlmStateChanged = { active ->
+            liveVlmActive = active
         }
     }
 
@@ -259,6 +265,11 @@ class MainActivity : AppCompatActivity() {
         fragment.requestOneShotVlm()
     }
 
+    private fun liveVlmButtonText(): String {
+        val isLiveModel = WalkAssistSettings.vlmModelOption(this) == VlmModelOption.GEMINI_3_1_FLASH_LIVE_API
+        return if (isLiveModel && liveVlmActive) "VLM 종료" else "VLM 시작"
+    }
+
     private fun stopArCoreReplayRecording() {
         val fragment = arFragment
             ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
@@ -335,6 +346,7 @@ private fun WalkAssistRootOverlay(
     feedbackState: FeedbackUiState,
     onOcrClick: () -> Unit,
     onVlmClick: () -> Unit,
+    vlmButtonText: String,
     onStopReplayRecording: () -> Unit,
     onPlaneMeshDebugChanged: (Boolean) -> Unit,
 ) {
@@ -423,7 +435,7 @@ private fun WalkAssistRootOverlay(
                 .padding(bottom = 18.dp),
         )
         GuideActionChip(
-            text = "VLM",
+            text = vlmButtonText,
             onClick = onVlmClick,
             modifier = Modifier
                 .align(Alignment.BottomStart)
