@@ -4,7 +4,7 @@ import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.os.Build
+import android.os.Bundle
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.util.Log
@@ -39,6 +39,7 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
             Log.e(TAG, "Korean TTS is not available")
             return
         }
+
         isReady = true
         tts?.setOnUtteranceProgressListener(
             object : UtteranceProgressListener() {
@@ -58,6 +59,7 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
                 }
             },
         )
+
         pendingSpeech?.let { pending ->
             pendingSpeech = null
             speak(
@@ -83,7 +85,12 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
         requestAudioFocus()
         tts?.setPitch(pitchFor(level))
         tts?.setSpeechRate(rateFor(level))
-        val result = tts?.speak(message, queueMode, null, UTTERANCE_ID)
+
+        val params = Bundle().apply {
+            putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_NOTIFICATION)
+        }
+
+        val result = tts?.speak(message, queueMode, params, UTTERANCE_ID)
         if (result != TextToSpeech.SUCCESS) {
             Log.w(TAG, "TTS speak failed result=$result")
         }
@@ -100,23 +107,17 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
 
     private fun requestAudioFocus() {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                    .setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build(),
-                    )
-                    .build()
-                audioFocusRequest?.let { audioManager.requestAudioFocus(it) }
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.requestAudioFocus(
-                    null,
-                    AudioManager.STREAM_NOTIFICATION,
-                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK,
+            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build(),
                 )
+                .build()
+
+            audioFocusRequest?.let { request ->
+                audioManager.requestAudioFocus(request)
             }
         } catch (error: Exception) {
             Log.e(TAG, "Audio focus request failed", error)
@@ -125,11 +126,8 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
 
     private fun abandonAudioFocus() {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-            } else {
-                @Suppress("DEPRECATION")
-                audioManager.abandonAudioFocus(null)
+            audioFocusRequest?.let { request ->
+                audioManager.abandonAudioFocusRequest(request)
             }
         } catch (error: Exception) {
             Log.e(TAG, "Audio focus abandon failed", error)
