@@ -29,12 +29,19 @@ data class TMapGeometry(
 data class TMapProperties(
     val totalDistance: Int?,
     val totalTime: Int?,
+    val description: String?,
 )
 
 data class PedestrianRoute(
     val points: List<RouteLatLng>,
+    val instructions: List<RouteInstruction>,
     val totalDistanceMeters: Int,
     val totalTimeSeconds: Int,
+)
+
+data class RouteInstruction(
+    val point: RouteLatLng,
+    val description: String,
 )
 
 data class RouteLatLng(
