@@ -27,7 +27,7 @@ class TMapRepository(
                     startY = startLatitude,
                     endX = endLongitude,
                     endY = endLatitude,
-                    startName = "현재 위치",
+                    startName = "내 위치",
                     endName = destinationName,
                 ),
                 appKey = apiKey,
@@ -37,40 +37,71 @@ class TMapRepository(
     }
 
     private fun TMapRouteResponse.toPedestrianRoute(): PedestrianRoute {
-        val routePoints = features.orEmpty().flatMap { feature ->
+        val features = features.orEmpty()
+        val routePoints = features.flatMap { feature ->
             val geometry = feature.geometry ?: return@flatMap emptyList()
-            geometry.coordinates.toRoutePoints(geometry.type)
+            if (geometry.type == "LineString") {
+                geometry.coordinates.toRoutePoints()
+            } else {
+                emptyList()
+            }
         }
 
         if (routePoints.isEmpty()) {
             throw IllegalStateException("TMap route response has no route coordinates.")
         }
 
-        val firstProperties = features
-            .orEmpty()
-            .firstNotNullOfOrNull { it.properties }
+        val instructions = features.mapIndexedNotNull { index, feature ->
+            val geometry = feature.geometry ?: return@mapIndexedNotNull null
+            if (geometry.type != "Point") return@mapIndexedNotNull null
+
+            val point = geometry.coordinates.asCoordinatePairOrNull() ?: return@mapIndexedNotNull null
+            val description = feature.properties
+                ?.description
+                ?.replace(Regex("\\[.*?]"), "")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: return@mapIndexedNotNull null
+
+            if (description.isImportantInstruction(index)) {
+                RouteInstruction(
+                    point = point,
+                    description = description,
+                )
+            } else {
+                null
+            }
+        }
+
+        val firstProperties = features.firstNotNullOfOrNull { it.properties }
 
         return PedestrianRoute(
             points = routePoints,
+            instructions = instructions,
             totalDistanceMeters = firstProperties?.totalDistance ?: 0,
             totalTimeSeconds = firstProperties?.totalTime ?: 0,
         )
     }
 
-    private fun JsonElement?.toRoutePoints(type: String?): List<RouteLatLng> {
+    private fun JsonElement?.toRoutePoints(): List<RouteLatLng> {
         val coordinates = this?.asJsonArrayOrNull() ?: return emptyList()
-        return when (type) {
-            "LineString" -> coordinates.mapNotNull { it.asCoordinatePairOrNull() }
-            "Point" -> listOfNotNull(coordinates.asCoordinatePairOrNull())
-            else -> emptyList()
-        }
+        return coordinates.mapNotNull { it.asCoordinatePairOrNull() }
     }
 
-    private fun JsonElement.asJsonArrayOrNull(): JsonArray? {
-        return if (isJsonArray) asJsonArray else null
+    private fun String.isImportantInstruction(index: Int): Boolean {
+        return index == 0 ||
+            contains("좌회전") ||
+            contains("우회전") ||
+            contains("횡단보도") ||
+            contains("유턴") ||
+            contains("도착")
     }
 
-    private fun JsonElement.asCoordinatePairOrNull(): RouteLatLng? {
+    private fun JsonElement?.asJsonArrayOrNull(): JsonArray? {
+        return if (this != null && isJsonArray) asJsonArray else null
+    }
+
+    private fun JsonElement?.asCoordinatePairOrNull(): RouteLatLng? {
         val array = asJsonArrayOrNull() ?: return null
         if (array.size() < 2) return null
         val longitude = array[0].asDoubleOrNull() ?: return null

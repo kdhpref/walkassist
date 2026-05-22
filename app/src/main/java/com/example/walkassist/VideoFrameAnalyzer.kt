@@ -1,4 +1,4 @@
-package com.example.walkassist
+﻿package com.example.walkassist
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -17,6 +17,7 @@ data class VideoFrameAnalysisResult(
     val pathMetrics: PathMetrics?,
     val crosswalk: CrosswalkPatternResult,
     val debugInfo: AnalyzerDebugInfo,
+    val vlmInterpretation: VlmSceneInterpretation?,
     val feedbackInput: FeedbackInput,
     val measurementState: ArMeasurementState,
 ) {
@@ -25,18 +26,20 @@ data class VideoFrameAnalysisResult(
             val collision = pathMetrics?.collisionDistanceMeters ?: pathMetrics?.centerObstacleMeters
             val clear = pathMetrics?.pathClearMeters
             return buildString {
-                append("objects=${detections.size}")
-                append(" floor=${((floorSegmentation?.confidence ?: 0f) * 100f).toInt()}%")
-                append(" clear=${clear?.let { String.format("%.1fm", it) } ?: "-"}")
-                append(" collision=${collision?.let { String.format("%.1fm", it) } ?: "-"}")
+                append("객체=${detections.size}")
+                append(" 바닥=${((floorSegmentation?.confidence ?: 0f) * 100f).toInt()}%")
+                append(" 이동가능=${clear?.let { String.format("%.1fm", it) } ?: "-"}")
+                append("장애물=${collision?.let { String.format("%.1fm", it) } ?: "-"}")
                 if (crosswalk.detected) {
-                    append(" crosswalk=${(crosswalk.score * 100f).toInt()}%")
+                    append(" 횡단보도=${(crosswalk.score * 100f).toInt()}%")
                 }
             }
         }
 }
 
-class VideoFrameAnalyzer(context: Context) {
+class VideoFrameAnalyzer(
+    context: Context,
+) {
     private val appContext = context.applicationContext
     private val floorSegmenter = ModelFloorSegmenter(appContext)
     private val objectAnalyzer = ObjectAnalyzer(appContext)
@@ -73,6 +76,9 @@ class VideoFrameAnalyzer(context: Context) {
                     pitchRadians = pitchRadians,
                     floorSegmentation = floorSegmentation,
                 ),
+                segmentCoverageRatio = detection.segmentCoverageRatio,
+                segmentCenterXRatio = detection.segmentCenterXRatio,
+                segmentCenterYRatio = detection.segmentCenterYRatio,
             )
         }
         val trackedObjects = objectTracker.update(
@@ -94,6 +100,24 @@ class VideoFrameAnalyzer(context: Context) {
             floorSegmentation = floorSegmentation,
             yoloConfidence = yoloCrosswalkConfidence,
         )
+        val primaryAnalysis = FrameAnalysis(
+            detections = trackedObjects,
+            nearestObstacle = trackedObjects
+                .mapNotNull { detection ->
+                    detection.distanceEstimate.distanceMeters?.let { distance -> detection to distance }
+                }
+                .minByOrNull { it.second }
+                ?.first,
+            floorSegmentation = floorSegmentation,
+            pathMetrics = pathMetrics,
+        )
+        val spatialFrame = SpatialFrame(
+            bitmap = bitmap,
+            timestampMillis = frameTimeMs,
+            source = SpatialFrameSource.VIDEO_REPLAY,
+            pitchRadians = pitchRadians,
+        )
+        val vlmInterpretation: VlmSceneInterpretation? = null
         val overlayDetections = trackedObjects
             .sortedWith(
                 compareByDescending<DetectedObjectResult> { it.trackingState?.isStable == true }
@@ -117,6 +141,9 @@ class VideoFrameAnalyzer(context: Context) {
                     lane = classifyScreenLane(centerXRatio),
                     isStable = detection.trackingState?.isStable == true,
                     trackId = detection.trackingState?.trackId,
+                    segmentCoverageRatio = detection.segmentCoverageRatio,
+                    segmentCenterXRatio = detection.segmentCenterXRatio,
+                    segmentCenterYRatio = detection.segmentCenterYRatio,
                     objectTimeToCollisionSeconds = detection.trackingState?.timeToCollisionSeconds,
                     objectClosingSpeedMetersPerSecond = detection.trackingState?.closingSpeedMetersPerSecond,
                 )
@@ -155,11 +182,12 @@ class VideoFrameAnalyzer(context: Context) {
             pathClearMeters = pathMetrics.pathClearMeters,
         )
         val statusLevel = statusLevelFor(riskLabel)
-        val guidanceLabel = guidanceLabelFor(
+        val primaryGuidanceLabel = guidanceLabelFor(
             collisionDistance = collisionDistance,
             riskLabel = riskLabel,
             suggestedDirection = suggestedDirection,
         )
+        val guidanceLabel = guidanceLabelWithVlm(primaryGuidanceLabel, vlmInterpretation)
         val feedbackInput = if (collisionDistance != null) {
             FeedbackInput.Obstacle(
                 FeedbackObstacleSample(
@@ -191,6 +219,7 @@ class VideoFrameAnalyzer(context: Context) {
                 trackedDetectionCount = overlayDetections.size,
                 lastError = objectAnalyzer.lastErrorMessage,
             ),
+            vlmInterpretation = vlmInterpretation,
             feedbackInput = feedbackInput,
             measurementState = ArMeasurementState(
                 trackingLabel = "video_replay",
@@ -209,7 +238,7 @@ class VideoFrameAnalyzer(context: Context) {
                     .minOrNull(),
                 riskLabel = riskLabel,
                 guidanceLabel = guidanceLabel,
-                statusLabel = "Video replay walking guidance",
+                statusLabel = "영상 테스트 보행 안내",
                 statusLevel = statusLevel,
                 crosswalkDetected = crosswalk.detected,
                 crosswalkScore = crosswalk.score,
@@ -217,7 +246,12 @@ class VideoFrameAnalyzer(context: Context) {
                 crosswalkYoloConfidence = crosswalk.yoloConfidence,
                 crosswalkModeLabel = crosswalk.modeLabel,
                 objectDetections = overlayDetections,
-                note = "Replay frames are replacing live camera input. ARCore pose/depth/planes are not available.",
+                vlmModelName = vlmInterpretation?.modelName.orEmpty(),
+                vlmRiskLabel = vlmInterpretation?.risk?.name?.lowercase().orEmpty(),
+                vlmSuggestedAction = vlmInterpretation?.suggestedAction?.name?.lowercase().orEmpty(),
+                vlmConfidenceScore = ((vlmInterpretation?.confidence ?: 0f) * 100f).toInt().coerceIn(0, 100),
+                vlmSummary = vlmInterpretation?.pathSummary.orEmpty(),
+                note = "영상 테스트는 라이브 카메라 대신 영상 프레임을 분석합니다. ARCore 자세, 깊이, 평면 정보는 사용할 수 없습니다.",
             ),
         )
     }
@@ -276,17 +310,28 @@ class VideoFrameAnalyzer(context: Context) {
         riskLabel: String,
         suggestedDirection: String,
     ): String {
-        if (collisionDistance == null) return "주변을 인식하는 중입니다."
+        if (collisionDistance == null) return "영상에서 보행 공간을 인식하는 중입니다."
         return when (riskLabel) {
-            "critical" -> "전방 장애물이 매우 가깝습니다."
-            "high" -> "전방 장애물을 주의하세요."
+            "critical" -> "영상 기준 전방 장애물이 매우 가깝습니다."
+            "high" -> "영상 기준 전방 장애물을 주의하세요."
             "watch" -> when (suggestedDirection) {
-                "left" -> "왼쪽 공간을 확인하세요."
-                "right" -> "오른쪽 공간을 확인하세요."
-                "blocked" -> "전방 공간을 다시 확인해 주세요."
-                else -> "전방을 확인해 주세요."
+                "left" -> "영상 기준 왼쪽 공간이 더 열려 있습니다."
+                "right" -> "영상 기준 오른쪽 공간이 더 열려 있습니다."
+                "blocked" -> "영상 기준 전방 공간이 좁아 보입니다."
+                else -> "영상에서 전방 공간을 인식 중입니다."
             }
-            else -> "전방 공간이 확보되어 있습니다."
+            else -> "영상 기준 전방 공간이 확보되어 있습니다."
+        }
+    }
+    private fun guidanceLabelWithVlm(
+        primaryGuidanceLabel: String,
+        vlmInterpretation: VlmSceneInterpretation?,
+    ): String {
+        if (vlmInterpretation == null) return primaryGuidanceLabel
+        return when (vlmInterpretation.risk) {
+            VlmWalkingRisk.BLOCKED -> "영상 장면 분석상 이동이 어려워 보입니다. $primaryGuidanceLabel"
+            VlmWalkingRisk.CAUTION -> "영상 장면 분석상 주의가 필요합니다. $primaryGuidanceLabel"
+            else -> primaryGuidanceLabel
         }
     }
 

@@ -3,6 +3,7 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 val localProperties = Properties().apply {
@@ -20,14 +21,28 @@ fun quotedBuildConfigValue(value: String): String {
     return "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
 }
 
+fun adbExecutablePath(): String {
+    val sdkDir = localProperties.getProperty("sdk.dir", "")
+    val executable = if (System.getProperty("os.name").lowercase().contains("windows")) {
+        "adb.exe"
+    } else {
+        "adb"
+    }
+    return if (sdkDir.isBlank()) {
+        executable
+    } else {
+        file("$sdkDir/platform-tools/$executable").absolutePath
+    }
+}
+
 android {
     namespace = "com.example.walkassist"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.walkassist"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
@@ -38,6 +53,11 @@ android {
             "String",
             "TMAP_API_KEY",
             quotedBuildConfigValue(localProperty("TMAP_API_KEY")),
+        )
+        buildConfigField(
+            "String",
+            "GEMINI_API_KEY",
+            quotedBuildConfigValue(localProperty("GEMINI_API_KEY")),
         )
         vectorDrawables {
             useSupportLibrary = true
@@ -68,20 +88,13 @@ android {
         buildConfig = true
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.10"
-    }
 }
 
 dependencies {
-    val cameraxVersion = "1.3.4"
-    implementation("androidx.camera:camera-core:$cameraxVersion")
-    implementation("androidx.camera:camera-camera2:$cameraxVersion")
-    implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
-    implementation("androidx.camera:camera-view:$cameraxVersion")
-
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("com.google.ai.edge.litert:litert:1.4.2")
+    implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.26.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.fragment:fragment-ktx:1.8.6")
@@ -94,7 +107,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview:1.6.1")
     implementation("androidx.compose.material3:material3:1.2.0")
     implementation("com.google.ar:core:1.46.0")
-    implementation("com.google.ar.sceneform.ux:sceneform-ux:1.17.1")
     implementation("com.google.mlkit:text-recognition-korean:16.0.1")
     implementation("com.naver.maps:map-sdk:3.23.1")
     implementation("com.google.android.gms:play-services-location:21.0.1")
@@ -103,4 +115,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
 
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:core:1.5.0")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
 }

@@ -1,33 +1,29 @@
 # WalkAssist
 
-Android obstacle-distance prototype for pedestrian assistance.
+Android AR walking-assistance prototype for local spatial awareness.
 
 ## Current pipeline
 
-- `CameraX` preview and frame analysis
-- `YOLOv8n` object detection from `app/src/main/assets/yolov8n.tflite`
+- `ARCore` live camera, tracking, planes, hit tests, and raw depth
+- local 2D occupancy map from ARCore world/depth observations
+- `YOLO26n-seg` object detection and segmentation metadata from `app/src/main/assets/yolo26n-seg.tflite`
 - `DeepLabV3-MobileNetV3 Cityscapes` floor segmentation from `app/src/main/assets/deeplabv3_cityscapes.tflite`
 - heuristic floor segmentation fallback when the model is unavailable or throttled
-- distance estimation from:
-  - phone pitch
-  - camera height assumption
-  - detected object ground-contact point
+- object distance enrichment from ARCore raw depth sampled inside object regions
+- manual Gemini API VLM scene interpretation from the current camera image
 - Compose overlay that shows:
   - detected object boxes
-  - estimated distance
+  - ARCore depth distance
   - nearest obstacle card
+  - local map
   - debug panel
 
 ## Current limitations
 
-- Distance is still a geometry estimate, not a true depth measurement
+- YOLO segmentation masks are decoded as compact segment metadata; full mask-to-depth fusion is the next step
 - The Cityscapes floor model is throttled and cached because it is expensive on-device
-- Accuracy depends on:
-  - seeing the floor clearly
-  - object touching the floor
-  - stable phone pitch
-  - correct camera height/FOV assumptions
-- `midas_v21_small.tflite` is still in the repo but not used in the current live pipeline
+- Explicit Android IMU collection is not wired yet; phone pitch and motion currently come from ARCore camera pose
+- VLM receives image plus compact CV context when the VLM button is pressed, but full ARCore depth/local-map context is still being structured
 
 ## Run
 
@@ -45,12 +41,43 @@ cmd /c gradlew.bat assembleDebug
 cmd /c gradlew.bat installDebug
 ```
 
-## Branches
+## VLM options
 
-- Active implementation branch: `codex/floor-segmentation`
+The VLM button uses the model selected in the app settings. Available choices are:
+
+- Gemini API
+- Gemini 3.1 Flash Live Preview
+- Florence-2 INT4 from `onnx-community/Florence-2-base-ft`
+- Florence-2 INT8 from `onnx-community/Florence-2-base-ft`
+
+Gemini sends the current camera image to the selected Gemini API option when
+the user presses the VLM button.
+
+When Gemini 3.1 Flash Live Preview is selected, the app runs a minimal Live API
+WebSocket demo: it opens the official `BidiGenerateContent` endpoint, sends the
+initial `setup` message with audio output transcription enabled, then sends the
+current camera image plus one short text turn through `clientContent`. It
+displays the returned output transcription, does not keep a continuous session
+open, and does not use the microphone.
+
+Put the API key in `local.properties`:
+
+```properties
+GEMINI_API_KEY=your_gemini_api_key_here
+```
+
+The key is exposed to the app through `BuildConfig.GEMINI_API_KEY`; do not put it
+in source-controlled Kotlin files.
+
+Florence-2 INT4 and INT8 assets are downloaded to the app external files model
+directory from the VLM settings screen. Desktop downloads can also be prepared with:
+
+```powershell
+python desktop_tools\florence2\download_onnx_community_assets.py --output-dir florence-2-base-ft
+```
 
 ## Next recommended work
 
-- replace the current heavy Cityscapes model with a smaller outdoor walkable-surface model
-- tune camera-height and FOV assumptions per device
-- add object-specific distance confidence and temporal filtering improvements
+- add an explicit IMU/orientation provider for compass heading, pitch/roll/yaw, and motion stability
+- fuse YOLO26n-seg masks with ARCore raw depth per object segment
+- build a typed VLM spatial context object containing phone pose, local map, segment summaries, and depth evidence

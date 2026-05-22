@@ -1,22 +1,37 @@
-package com.example.walkassist
+﻿package com.example.walkassist
 
-import android.content.Context
+import android.content.Intent
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.os.Bundle
 import android.text.InputType
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class GuideSettingsActivity : AppCompatActivity() {
     private val preferences by lazy {
-        getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+        WalkAssistSettings.preferences(this)
     }
+    private var replayPickerDialog: AlertDialog? = null
+    private lateinit var vlmModelButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,7 +56,7 @@ class GuideSettingsActivity : AppCompatActivity() {
         }
 
         val descriptionText = TextView(this).apply {
-            text = "긴급 상황에 사용할 보호자 연락처를 관리합니다."
+            text = "긴급 연락처와 ARCore 리플레이 녹화 파일을 관리합니다."
             textSize = 16f
             setTextColor(0xFFD8E3EE.toInt())
             gravity = Gravity.CENTER
@@ -55,6 +70,72 @@ class GuideSettingsActivity : AppCompatActivity() {
             setOnClickListener { showEmergencyContactDialog() }
         }
 
+        vlmModelButton = Button(this).apply {
+            text = vlmModelButtonText()
+            textSize = 20f
+            minHeight = 72
+            setOnClickListener { showVlmModelSelectionDialog() }
+        }
+
+        val arcoreTtsButton = Button(this).apply {
+            text = arcoreTtsButtonText()
+            textSize = 20f
+            minHeight = 72
+            setOnClickListener {
+                val nextEnabled = !WalkAssistSettings.isArcoreTtsEnabled(this@GuideSettingsActivity)
+                WalkAssistSettings.setArcoreTtsEnabled(this@GuideSettingsActivity, nextEnabled)
+                text = arcoreTtsButtonText()
+                Toast.makeText(
+                    this@GuideSettingsActivity,
+                    if (nextEnabled) "ARCore TTS enabled" else "ARCore TTS disabled",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
+
+        val arcoreRecordButton = Button(this).apply {
+            text = "ARCore 리플레이 녹화"
+            textSize = 20f
+            minHeight = 72
+            setOnClickListener {
+                startArCoreRecord()
+            }
+        }
+
+        val arcoreStorageText = TextView(this).apply {
+            text = arcoreStorageDescription()
+            textSize = 14f
+            setTextColor(0xFFB9C7D5.toInt())
+            setPadding(0, 14, 0, 0)
+        }
+
+        val arcorePlaybackButton = Button(this).apply {
+            text = "마지막 ARCore 리플레이 재생"
+            textSize = 20f
+            minHeight = 72
+            setOnClickListener {
+                val lastUri = ArCoreReplayController.lastDatasetUri(this@GuideSettingsActivity)
+                if (lastUri == null) {
+                    Toast.makeText(
+                        this@GuideSettingsActivity,
+                        "저장된 ARCore 데이터셋이 없습니다. 먼저 녹화해 주세요.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                } else {
+                    startArCorePlayback(lastUri)
+                }
+            }
+        }
+
+        val arcoreSavedPlaybackButton = Button(this).apply {
+            text = "저장된 ARCore 리플레이 선택"
+            textSize = 20f
+            minHeight = 72
+            setOnClickListener {
+                showRecordedDatasetPicker()
+            }
+        }
+
         val closeButton = Button(this).apply {
             text = "닫기"
             textSize = 18f
@@ -65,8 +146,278 @@ class GuideSettingsActivity : AppCompatActivity() {
         root.addView(titleText, fullWidthParams())
         root.addView(descriptionText, fullWidthParams())
         root.addView(emergencyButton, fullWidthParams())
+        root.addView(vlmModelButton, fullWidthParams(topMargin = 18))
+        root.addView(arcoreTtsButton, fullWidthParams(topMargin = 18))
+        root.addView(arcoreRecordButton, fullWidthParams(topMargin = 18))
+        root.addView(arcoreStorageText, fullWidthParams())
+        root.addView(arcorePlaybackButton, fullWidthParams(topMargin = 18))
+        root.addView(arcoreSavedPlaybackButton, fullWidthParams(topMargin = 18))
         root.addView(closeButton, fullWidthParams(topMargin = 18))
         setContentView(root)
+    }
+
+    private fun startArCorePlayback(uri: Uri) {
+        ArCoreReplayController.saveLastDataset(this, uri)
+        startActivity(
+            arCoreReplayIntent()
+                .putExtra(ArCoreReplayController.EXTRA_PLAYBACK_DATASET_URI, uri.toString()),
+        )
+    }
+
+    private fun startArCoreRecord() {
+        startActivity(
+            arCoreReplayIntent()
+                .putExtra(ArCoreReplayController.EXTRA_RECORD_ON_START, true),
+        )
+    }
+
+    private fun arCoreReplayIntent(): Intent {
+        return Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+    }
+
+    private fun arcoreStorageDescription(): String {
+        val directory = ArCoreReplayController.recordingDirectory(this)
+        val count = ArCoreReplayController.recordedDatasets(this).size
+        return "녹화 파일 저장 위치: ${directory.absolutePath}\n저장된 ARCore 리플레이: ${count}개"
+    }
+
+    private fun showRecordedDatasetPicker() {
+        val datasets = ArCoreReplayController.recordedDatasets(this)
+        if (datasets.isEmpty()) {
+            Toast.makeText(
+                this,
+                "저장된 ARCore 리플레이가 없습니다. 먼저 녹화해 주세요.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
+
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+
+        datasets.forEach { dataset ->
+            list.addView(createReplayDatasetRow(dataset))
+        }
+
+        val scrollView = ScrollView(this).apply {
+            addView(list)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(420),
+            )
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("저장된 ARCore 리플레이")
+            .setView(scrollView)
+            .setNegativeButton("취소", null)
+            .create()
+        replayPickerDialog = dialog
+        dialog.setOnDismissListener {
+            if (replayPickerDialog === dialog) {
+                replayPickerDialog = null
+            }
+        }
+        dialog.show()
+    }
+
+    private fun createReplayDatasetRow(dataset: ArCoreReplayDataset): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            isClickable = true
+            setOnClickListener {
+                replayPickerDialog?.dismiss()
+                startArCorePlayback(dataset.uri)
+            }
+        }
+
+        val thumbnail = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            setBackgroundColor(0xFF24313D.toInt())
+            createReplayThumbnail(dataset)?.let { setImageBitmap(it) }
+            layoutParams = LinearLayout.LayoutParams(dp(88), dp(64))
+        }
+
+        val textColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), 0, dp(8), 0)
+            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        val title = TextView(this).apply {
+            text = dataset.fileName
+            textSize = 16f
+            setTextColor(0xFF111111.toInt())
+            maxLines = 2
+        }
+
+        val details = TextView(this).apply {
+            text = "${formatDateTime(dataset.lastModifiedMillis)} · ${formatSize(dataset.sizeBytes)}"
+            textSize = 13f
+            setTextColor(0xFF5C6670.toInt())
+            setPadding(0, dp(4), 0, 0)
+        }
+
+        val deleteButton = Button(this).apply {
+            text = "삭제"
+            minWidth = dp(72)
+            minHeight = dp(44)
+            setOnClickListener {
+                showDeleteReplayDialog(dataset)
+            }
+        }
+
+        textColumn.addView(title)
+        textColumn.addView(details)
+        row.addView(thumbnail)
+        row.addView(textColumn)
+        row.addView(deleteButton)
+        return row
+    }
+
+    private fun showDeleteReplayDialog(dataset: ArCoreReplayDataset) {
+        AlertDialog.Builder(this)
+            .setTitle("리플레이 삭제")
+            .setMessage("${dataset.fileName} 파일을 삭제할까요?")
+            .setPositiveButton("삭제") { _, _ ->
+                replayPickerDialog?.dismiss()
+                val deleted = ArCoreReplayController.deleteRecordedDataset(this, dataset)
+                Toast.makeText(
+                    this,
+                    if (deleted) "ARCore 리플레이를 삭제했습니다." else "ARCore 리플레이를 삭제하지 못했습니다.",
+                    Toast.LENGTH_SHORT,
+                ).show()
+                showRecordedDatasetPicker()
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
+    private fun createReplayThumbnail(dataset: ArCoreReplayDataset): Bitmap? {
+        return runCatching {
+            MediaMetadataRetriever().use { retriever ->
+                retriever.setDataSource(dataset.absolutePath)
+                retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            }
+        }.getOrNull()
+    }
+
+    private fun formatDateTime(timeMillis: Long): String {
+        return SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA).format(Date(timeMillis))
+    }
+
+    private fun formatSize(bytes: Long): String {
+        val mb = bytes / (1024.0 * 1024.0)
+        return String.format(Locale.KOREA, "%.1f MB", mb)
+    }
+
+    private fun vlmModelButtonText(): String {
+        val option = WalkAssistSettings.vlmModelOption(this)
+        val readiness = when (option) {
+            VlmModelOption.GEMINI_API,
+            VlmModelOption.GEMINI_3_1_FLASH_LIVE_API,
+            -> if (BuildConfig.GEMINI_API_KEY.isBlank()) {
+                "API key needed"
+            } else {
+                "ready"
+            }
+            VlmModelOption.FLORENCE2_INT4,
+            VlmModelOption.FLORENCE2_INT8,
+            -> option.florenceVariant
+                ?.let { Florence2ModelStore.localStatus(this, it) }
+                ?.let { if (it.isAvailable) "downloaded" else "missing ${it.missingFiles.size}" }
+                ?: "missing"
+        }
+        return "VLM: ${option.displayName} ($readiness)"
+    }
+
+    private fun showVlmModelSelectionDialog() {
+        val options = VlmModelOption.values()
+        var selectedIndex = options.indexOf(WalkAssistSettings.vlmModelOption(this)).coerceAtLeast(0)
+        val labels = options.map { option ->
+            when (option) {
+                VlmModelOption.GEMINI_API,
+                VlmModelOption.GEMINI_3_1_FLASH_LIVE_API,
+                -> if (BuildConfig.GEMINI_API_KEY.isBlank()) {
+                    "${option.displayName} - API key needed"
+                } else {
+                    "${option.displayName} - ready"
+                }
+                VlmModelOption.FLORENCE2_INT4,
+                VlmModelOption.FLORENCE2_INT8,
+                -> option.florenceVariant
+                    ?.let { variant ->
+                        val status = Florence2ModelStore.localStatus(this, variant)
+                        if (status.isAvailable) {
+                            "${option.displayName} - downloaded"
+                        } else {
+                            "${option.displayName} - missing ${status.missingFiles.size} files"
+                        }
+                    }
+                    ?: option.displayName
+            }
+        }.toTypedArray()
+
+        AlertDialog.Builder(this)
+            .setTitle("VLM model")
+            .setSingleChoiceItems(labels, selectedIndex) { _, which ->
+                selectedIndex = which
+            }
+            .setPositiveButton("Select") { _, _ ->
+                val option = options[selectedIndex]
+                WalkAssistSettings.setVlmModelOption(this, option)
+                vlmModelButton.text = vlmModelButtonText()
+                option.florenceVariant?.let { variant ->
+                    if (!Florence2ModelStore.localStatus(this, variant).isAvailable) {
+                        Toast.makeText(
+                            this,
+                            "Selected ${variant.displayName}. Use Download Florence models to fetch local files.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
+            }
+            .setNeutralButton("Download Florence models") { _, _ ->
+                downloadFlorenceModels(Florence2OnnxVariant.values().toList())
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun downloadFlorenceModels(variants: List<Florence2OnnxVariant>) {
+        Toast.makeText(this, "Downloading Florence-2 INT4 and INT8 files...", Toast.LENGTH_LONG).show()
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                variants.forEach { variant ->
+                    Florence2ModelStore.downloadVariant(this@GuideSettingsActivity, variant)
+                }
+            }
+            withContext(Dispatchers.Main) {
+                vlmModelButton.text = vlmModelButtonText()
+                Toast.makeText(
+                    this@GuideSettingsActivity,
+                    result.fold(
+                        onSuccess = { "Florence-2 INT4 and INT8 files are ready." },
+                        onFailure = { "Florence-2 download failed: ${it.message ?: "unknown error"}" },
+                    ),
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+        }
+    }
+
+    private fun arcoreTtsButtonText(): String {
+        return if (WalkAssistSettings.isArcoreTtsEnabled(this)) {
+            "ARCore TTS: ON"
+        } else {
+            "ARCore TTS: OFF"
+        }
     }
 
     private fun showEmergencyContactDialog() {
@@ -136,6 +487,10 @@ class GuideSettingsActivity : AppCompatActivity() {
         return digitsOnly.length in 8..15
     }
 
+    private fun dp(value: Int): Int {
+        return (value * resources.displayMetrics.density).toInt()
+    }
+
     private fun fullWidthParams(topMargin: Int = 0): LinearLayout.LayoutParams {
         return LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
@@ -148,7 +503,6 @@ class GuideSettingsActivity : AppCompatActivity() {
     }
 
     companion object {
-        private const val PREF_NAME = "walkassist_settings"
         private const val KEY_EMERGENCY_NAME = "emergency_name"
         private const val KEY_EMERGENCY_PHONE = "emergency_phone"
     }

@@ -7,22 +7,41 @@ import com.example.walkassist.feedback.core.FeedbackSensorStatus
 import com.example.walkassist.feedback.core.FeedbackSensorType
 
 class ArFeedbackMapper {
+
     fun map(state: ArMeasurementState): FeedbackInput {
         val distance = state.collisionDistanceMeters
+            ?: state.centerDistanceMeters
+            ?: state.depthDistanceMeters
+            ?: state.floorDistanceMeters
+
+        val sensorType = when (state.trackingLabel) {
+            "tracking" -> FeedbackSensorType.ARCORE
+            "video_replay" -> FeedbackSensorType.VIDEO_REPLAY
+            else -> null
+        }
+
         return when {
-            state.trackingLabel != "tracking" -> {
-                FeedbackInput.SensorStatus(FeedbackSensorStatus.WAITING)
+            sensorType == null -> {
+                FeedbackInput.SensorStatus(
+                    status = FeedbackSensorStatus.WAITING,
+                )
             }
+
             distance == null -> {
-                FeedbackInput.SensorStatus(FeedbackSensorStatus.WAITING)
+                FeedbackInput.SensorStatus(
+                    status = FeedbackSensorStatus.WAITING,
+                )
             }
+
             else -> {
                 FeedbackInput.Obstacle(
-                    FeedbackObstacleSample(
+                    sample = FeedbackObstacleSample(
                         distanceMeters = distance,
                         confidence = (state.sensingConfidenceScore / 100f).coerceIn(0f, 1f),
-                        sensorType = FeedbackSensorType.ARCORE,
+                        sensorType = sensorType,
                     ),
+                    direction = state.suggestedDirection,
+                    crosswalkDetected = state.crosswalkDetected,
                 )
             }
         }

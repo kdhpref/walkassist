@@ -20,9 +20,17 @@
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:largeHeap="true"
+        android:pageSizeCompat="enabled"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.WalkAssist">
+        <uses-native-library
+            android:name="libvndksupport.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
         <meta-data
             android:name="com.google.ar.core"
             android:value="required" />
@@ -48,7 +56,7 @@
         <activity
             android:name=".SpatialReplayTestActivity"
             android:exported="false"
-            android:label="영상 리플레이 테스트"
+            android:label="영상 테스트"
             android:theme="@style/Theme.WalkAssist" />
         <activity
             android:name=".map.MapNavigationActivity"

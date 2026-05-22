@@ -1,5 +1,6 @@
 package com.example.walkassist
 
+import android.graphics.Bitmap
 import android.graphics.RectF
 
 enum class DistanceSource {
@@ -43,6 +44,9 @@ data class DetectedObjectResult(
     val imageWidth: Int,
     val label: String,
     val distanceEstimate: DetectionDistanceEstimate,
+    val segmentCoverageRatio: Float? = null,
+    val segmentCenterXRatio: Float? = null,
+    val segmentCenterYRatio: Float? = null,
     val trackingState: TrackingState? = null,
 )
 
@@ -63,6 +67,7 @@ data class FloorSegmentationResult(
     val height: Int,
     val boundaryYByColumn: IntArray,
     val confidence: Float,
+    val classMask: SemanticClassMask? = null,
 ) {
     fun boundaryYAt(imageX: Float, imageWidth: Int, imageHeight: Int): Float? {
         if (boundaryYByColumn.isEmpty() || imageWidth <= 0 || imageHeight <= 0) return null
@@ -73,6 +78,12 @@ data class FloorSegmentationResult(
         return (boundaryY / height.toFloat()) * imageHeight.toFloat()
     }
 }
+
+data class SemanticClassMask(
+    val width: Int,
+    val height: Int,
+    val classIds: IntArray,
+)
 
 data class PathMetrics(
     val pathClearMeters: Float?,
@@ -90,4 +101,23 @@ data class FrameAnalysis(
     val floorSegmentation: FloorSegmentationResult? = null,
     val pathMetrics: PathMetrics? = null,
     val debugInfo: AnalyzerDebugInfo? = null,
+)
+
+enum class SpatialFrameSource {
+    LIVE_CAMERA,
+    VIDEO_REPLAY,
+}
+
+enum class VlmRequestMode {
+    AUTO,
+    MANUAL,
+}
+
+data class SpatialFrame(
+    val bitmap: Bitmap,
+    val timestampMillis: Long,
+    val source: SpatialFrameSource,
+    val pitchRadians: Float,
+    val arState: ArMeasurementState? = null,
+    val requestMode: VlmRequestMode = VlmRequestMode.AUTO,
 )

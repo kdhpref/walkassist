@@ -19,6 +19,9 @@ data class ObjectOverlayDetection(
     val lane: String? = null,
     val isStable: Boolean = false,
     val trackId: Int? = null,
+    val segmentCoverageRatio: Float? = null,
+    val segmentCenterXRatio: Float? = null,
+    val segmentCenterYRatio: Float? = null,
     val objectTimeToCollisionSeconds: Float? = null,
     val objectClosingSpeedMetersPerSecond: Float? = null,
     val motionDirectionLabel: String? = null,
@@ -41,31 +44,22 @@ data class PlanePolygonOverlay(
     val points: List<OverlayPointRatio>,
 )
 
-data class VoxelColumnUi(
-    val relativeX: Float,
-    val relativeZ: Float,
-    val occupancyScore: Float,
-    val confidenceScore: Float,
-    val heightMeters: Float,
-    val voxelCount: Int,
+data class DepthGridCell(
+    val column: Int,
+    val row: Int,
+    val distanceMeters: Float?,
+    val confidence: Float = 0f,
 )
 
-data class VoxelPointUi(
-    val worldX: Float,
-    val worldY: Float,
-    val worldZ: Float,
-    val relativeX: Float,
-    val relativeY: Float,
-    val relativeZ: Float,
-    val occupancyScore: Float,
-    val confidenceScore: Float,
-)
-
-data class VoxelOverlayPointUi(
+data class FloorOverlayColumn(
     val xRatio: Float,
-    val yRatio: Float,
-    val occupancyScore: Float,
-    val confidenceScore: Float,
+    val boundaryYRatio: Float,
+)
+
+data class SemanticClassMaskOverlay(
+    val width: Int,
+    val height: Int,
+    val classIds: IntArray,
 )
 
 data class ArMeasurementState(
@@ -100,6 +94,10 @@ data class ArMeasurementState(
     val crosswalkYoloConfidence: Float = 0f,
     val crosswalkModeLabel: String = "",
     val objectDetections: List<ObjectOverlayDetection> = emptyList(),
+    val depthGridCells: List<DepthGridCell> = emptyList(),
+    val floorOverlayColumns: List<FloorOverlayColumn> = emptyList(),
+    val floorOverlayConfidence: Float = 0f,
+    val semanticClassMask: SemanticClassMaskOverlay? = null,
     val planeDetections: List<PlaneOverlayDetection> = emptyList(),
     val planePolygons: List<PlanePolygonOverlay> = emptyList(),
     val worldMapCells: List<WorldMapCellUi> = emptyList(),
@@ -115,14 +113,10 @@ data class ArMeasurementState(
     val worldMapLeftFreeSpaceMeters: Float? = null,
     val worldMapCenterFreeSpaceMeters: Float? = null,
     val worldMapRightFreeSpaceMeters: Float? = null,
-    val voxelColumns: List<VoxelColumnUi> = emptyList(),
-    val voxelPoints: List<VoxelPointUi> = emptyList(),
-    val voxelOverlayPoints: List<VoxelOverlayPointUi> = emptyList(),
-    val voxelRangeMeters: Float = 5f,
-    val voxelSizeMeters: Float = 0.25f,
-    val voxelKnownCount: Int = 0,
-    val voxelOccupiedCount: Int = 0,
-    val voxelObstacleColumns: Int = 0,
-    val voxelConfidenceScore: Int = 0,
+    val vlmModelName: String = "",
+    val vlmRiskLabel: String = "",
+    val vlmSuggestedAction: String = "",
+    val vlmConfidenceScore: Int = 0,
+    val vlmSummary: String = "",
     val note: String = "",
 )

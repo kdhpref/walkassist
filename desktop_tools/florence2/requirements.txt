@@ -1,0 +1,11 @@
+torch
+transformers>=4.49.0
+onnx==1.17.0
+onnxruntime
+onnx2tf
+onnx-graphsurgeon
+tensorflow
+tf-keras
+timm
+einops
+Pillow

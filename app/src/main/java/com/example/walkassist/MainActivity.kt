@@ -1,12 +1,17 @@
-package com.example.walkassist
+﻿package com.example.walkassist
 
 import android.Manifest
 import android.content.Intent
+import android.graphics.Bitmap
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.foundation.background
@@ -31,6 +36,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,15 +49,19 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.activity.viewModels
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.fragment.app.commitNow
 import androidx.fragment.app.FragmentContainerView
 import androidx.lifecycle.Lifecycle
@@ -64,8 +75,10 @@ import com.example.walkassist.feedback.engine.FeedbackViewModel
 import com.example.walkassist.feedback.runtime.FeedbackManager
 import com.example.walkassist.feedback.ui.FeedbackOverlayCard
 import com.example.walkassist.map.MapNavigationActivity
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlin.math.abs
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.min
 
@@ -75,14 +88,25 @@ class MainActivity : AppCompatActivity() {
     private val arFeedbackMapper = ArFeedbackMapper()
     private lateinit var feedbackManager: FeedbackManager
     private var arFragment: WalkAssistArFragment? = null
+    private var liveVlmActive by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        configureFullscreenCutout()
         feedbackManager = FeedbackManager(this)
+        if (!intent.getBooleanExtra(ArCoreReplayController.EXTRA_RECORD_ON_START, false) &&
+            intent.getStringExtra(ArCoreReplayController.EXTRA_PLAYBACK_DATASET_URI).isNullOrBlank()
+        ) {
+            ArCoreReplayController.reset()
+        }
+        prepareVlmModelAtStartup()
         bindArStateToFeedback()
 
-        if (!hasCameraPermission()) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 100)
+        val missingStartupPermissions = buildList {
+            if (!hasCameraPermission()) add(Manifest.permission.CAMERA)
+        }
+        if (missingStartupPermissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missingStartupPermissions.toTypedArray(), 100)
         }
 
         val root = FrameLayout(this).apply {
@@ -114,10 +138,10 @@ class MainActivity : AppCompatActivity() {
                         state = arState,
                         feedbackState = feedbackState,
                         onOcrClick = ::requestOneShotOcr,
-                        onReplayTestClick = {
-                            startActivity(Intent(this@MainActivity, SpatialReplayTestActivity::class.java))
-                            finish()
-                        },
+                        onVlmClick = ::requestOneShotVlm,
+                        vlmButtonText = liveVlmButtonText(),
+                        onStopReplayRecording = ::stopArCoreReplayRecording,
+                        onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
                     )
                 }
             }
@@ -141,11 +165,64 @@ class MainActivity : AppCompatActivity() {
 
     private fun configureArFragment(fragment: WalkAssistArFragment) {
         arFragment = fragment
+        fragment.recordReplayOnSessionStart =
+            intent.getBooleanExtra(ArCoreReplayController.EXTRA_RECORD_ON_START, false)
+        fragment.playbackDatasetUri = intent
+            .getStringExtra(ArCoreReplayController.EXTRA_PLAYBACK_DATASET_URI)
+            ?.takeIf { it.isNotBlank() }
+            ?.let(android.net.Uri::parse)
         fragment.onOneShotOcrResult = { message ->
             feedbackManager.provideFeedback(
                 message = message,
                 level = FeedbackAlertLevel.CAUTION,
             )
+        }
+        fragment.onOneShotVlmResult = { message ->
+            feedbackManager.provideFeedback(
+                message = message,
+                level = FeedbackAlertLevel.CAUTION,
+                prioritySpeech = true,
+            )
+        }
+        fragment.onLiveVlmStateChanged = { active ->
+            liveVlmActive = active
+        }
+    }
+
+    private fun prepareVlmModelAtStartup() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            val status = runCatching {
+                WalkAssistVlmFactory.prepareSelected(this@MainActivity)
+            }.onFailure {
+                Log.w(TAG, "VLM startup preparation failed", it)
+            }.getOrElse {
+                VlmModelPreparationStatus(
+                    modelName = WalkAssistSettings.vlmModelOption(this@MainActivity).displayName,
+                    statusLabel = "unknown",
+                    downloadState = null,
+                    isAvailable = false,
+                    isFallbackLikely = true,
+                    explanation = "장면 분석 모델 상태를 확인하지 못했습니다.",
+                )
+            }
+
+            Log.i(
+                TAG,
+                "VLM startup preparation model=${status.modelName} status=${status.statusLabel} " +
+                    "download=${status.downloadState ?: "none"} available=${status.isAvailable}",
+            )
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(
+                    this@MainActivity,
+                    if (status.isAvailable) {
+                        "VLM 준비 완료: ${status.modelName}"
+                    } else {
+                        "VLM ${status.statusLabel}. ${status.explanation}"
+                    },
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
         }
     }
 
@@ -165,6 +242,48 @@ class MainActivity : AppCompatActivity() {
         fragment.requestOneShotOcr()
     }
 
+    private fun requestOneShotVlm() {
+        if (!WalkAssistSettings.debugPipelineFlags(this).vlmEnabled) {
+            feedbackManager.provideFeedback(
+                message = "디버그 설정에서 VLM 파이프라인이 꺼져 있습니다.",
+                level = FeedbackAlertLevel.CAUTION,
+            )
+            return
+        }
+        val fragment = arFragment
+            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.also(::configureArFragment)
+
+        if (fragment == null) {
+            feedbackManager.provideFeedback(
+                message = "장면 분석을 준비 중입니다. 잠시 후 다시 눌러 주세요.",
+                level = FeedbackAlertLevel.CAUTION,
+            )
+            return
+        }
+
+        fragment.requestOneShotVlm()
+    }
+
+    private fun liveVlmButtonText(): String {
+        val isLiveModel = WalkAssistSettings.vlmModelOption(this) == VlmModelOption.GEMINI_3_1_FLASH_LIVE_API
+        return if (isLiveModel && liveVlmActive) "VLM 종료" else "VLM 시작"
+    }
+
+    private fun stopArCoreReplayRecording() {
+        val fragment = arFragment
+            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.also(::configureArFragment)
+        fragment?.stopArCoreReplayRecording()
+    }
+
+    private fun setPlaneMeshDebugVisible(visible: Boolean) {
+        val fragment = arFragment
+            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.also(::configureArFragment)
+        fragment?.setPlaneMeshDebugVisible(visible)
+    }
+
     private fun bindArStateToFeedback() {
         feedbackViewModel.startWatchdog()
         lifecycleScope.launch {
@@ -177,10 +296,12 @@ class MainActivity : AppCompatActivity() {
                 launch {
                     feedbackViewModel.uiState.collect { feedbackState ->
                         if (feedbackState.shouldAnnounce) {
-                            feedbackManager.provideFeedback(
-                                message = feedbackState.message,
-                                level = feedbackState.alertLevel,
-                            )
+                            if (WalkAssistSettings.isArcoreTtsEnabled(this@MainActivity)) {
+                                feedbackManager.provideFeedback(
+                                    message = feedbackState.message,
+                                    level = feedbackState.alertLevel,
+                                )
+                            }
                             feedbackViewModel.consumeAnnouncement()
                         }
                     }
@@ -200,6 +321,23 @@ class MainActivity : AppCompatActivity() {
         return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
     }
+
+    private fun configureFullscreenCutout() {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = android.graphics.Color.TRANSPARENT
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        window.attributes = window.attributes.apply {
+            layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 35) {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+    }
+
+    companion object {
+        private const val TAG = "WalkAssistMain"
+    }
 }
 
 @Composable
@@ -207,12 +345,39 @@ private fun WalkAssistRootOverlay(
     state: ArMeasurementState,
     feedbackState: FeedbackUiState,
     onOcrClick: () -> Unit,
-    onReplayTestClick: () -> Unit,
+    onVlmClick: () -> Unit,
+    vlmButtonText: String,
+    onStopReplayRecording: () -> Unit,
+    onPlaneMeshDebugChanged: (Boolean) -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
+    var replayState by remember { mutableStateOf(ArCoreReplayController.currentState()) }
     val context = LocalContext.current
+    var debugFlags by remember { mutableStateOf(WalkAssistSettings.debugPipelineFlags(context)) }
+    val resourceMonitor = remember(context) { ResourceMonitor(context.applicationContext) }
+    var resourceUsage by remember { mutableStateOf(ResourceUsageSnapshot()) }
+    val updateDebugFlags: (DebugPipelineFlags) -> Unit = { nextFlags ->
+        debugFlags = nextFlags
+        WalkAssistSettings.setDebugPipelineFlags(context, nextFlags)
+    }
+    LaunchedEffect(resourceMonitor) {
+        while (true) {
+            resourceUsage = withContext(Dispatchers.Default) {
+                resourceMonitor.sample()
+            }
+            delay(2_000L)
+        }
+    }
+    DisposableEffect(Unit) {
+        val listener: (ArCoreReplayUiState) -> Unit = { replayState = it }
+        ArCoreReplayController.addListener(listener)
+        onDispose { ArCoreReplayController.removeListener(listener) }
+    }
     val openMapNavigation = {
         context.startActivity(Intent(context, MapNavigationActivity::class.java))
+    }
+    val openSettings = {
+        context.startActivity(Intent(context, GuideSettingsActivity::class.java))
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -220,12 +385,12 @@ private fun WalkAssistRootOverlay(
             MeasurementOverlay(
                 state = state,
                 feedbackState = feedbackState,
+                debugFlags = debugFlags,
+                onDebugFlagsChanged = updateDebugFlags,
+                onPlaneMeshDebugChanged = onPlaneMeshDebugChanged,
             )
             CameraUiControls(
                 onGuideClick = { cameraUiVisible = false },
-                onSettingsClick = {
-                    context.startActivity(Intent(context, GuideSettingsActivity::class.java))
-                },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 14.dp, bottom = 150.dp),
@@ -235,19 +400,31 @@ private fun WalkAssistRootOverlay(
                 arState = state,
                 feedbackState = feedbackState,
                 onCameraClick = { cameraUiVisible = true },
-                onSettingsClick = {
-                    context.startActivity(Intent(context, GuideSettingsActivity::class.java))
-                },
-                onReplayTestClick = onReplayTestClick,
+                onMapClick = openMapNavigation,
             )
         }
 
         GuideActionChip(
-            text = "길찾기",
-            onClick = openMapNavigation,
+            text = "설정",
+            onClick = openSettings,
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(top = 14.dp, end = 14.dp),
+                .padding(top = 104.dp, end = 6.dp),
+        )
+
+        ResourceUsagePanel(
+            usage = resourceUsage,
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(top = 14.dp, end = 6.dp),
+        )
+
+        ArCoreReplayStatusPanel(
+            state = replayState,
+            onStopRecording = onStopReplayRecording,
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(top = 14.dp, start = 14.dp),
         )
 
         GuideActionChip(
@@ -257,6 +434,91 @@ private fun WalkAssistRootOverlay(
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 18.dp),
         )
+        GuideActionChip(
+            text = vlmButtonText,
+            onClick = onVlmClick,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(start = 14.dp, bottom = 18.dp),
+        )
+    }
+}
+
+@Composable
+private fun ResourceUsagePanel(
+    usage: ResourceUsageSnapshot,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .width(178.dp),
+        horizontalAlignment = Alignment.End,
+    ) {
+        ResourceUsageText("CPU ${formatPercent(usage.cpuCorePercent)}% / ${formatPercent(usage.cpuDevicePercent)}%")
+        ResourceUsageText("GPU ${usage.gpuPercent?.let { "$it%" } ?: "--"}")
+        ResourceUsageText("RAM ${usage.systemRamPercent}%")
+    }
+}
+
+@Composable
+private fun ResourceUsageText(
+    text: String,
+) {
+    Text(
+        text = text,
+        color = Color(0xFF68F29A),
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.End,
+    )
+}
+
+@Composable
+private fun ArCoreReplayStatusPanel(
+    state: ArCoreReplayUiState,
+    onStopRecording: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (state.mode == ArCoreReplayMode.LIVE && state.message.isBlank()) return
+
+    Column(
+        modifier = modifier
+            .width(230.dp)
+            .background(Color(0xB8121820), RoundedCornerShape(16.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Text(
+            text = when (state.mode) {
+                ArCoreReplayMode.RECORDING -> "ARCore 녹화"
+                ArCoreReplayMode.PLAYBACK -> "ARCore 재생"
+                ArCoreReplayMode.LIVE -> "ARCore 리플레이"
+            },
+            color = Color.White,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        if (state.message.isNotBlank()) {
+            Spacer(modifier = Modifier.height(5.dp))
+            Text(
+                text = state.message,
+                color = Color(0xFFD8E3EE),
+                fontSize = 12.sp,
+            )
+        }
+        Spacer(modifier = Modifier.height(5.dp))
+        Text(
+            text = "REC ${state.recordingStatus} / PLAY ${state.playbackStatus}",
+            color = Color(0xFFB7F7CE),
+            fontSize = 11.sp,
+        )
+        if (state.mode == ArCoreReplayMode.RECORDING) {
+            Spacer(modifier = Modifier.height(8.dp))
+            GuideActionChip(
+                text = "녹화 중지",
+                onClick = onStopRecording,
+                modifier = Modifier.width(104.dp),
+            )
+        }
     }
 }
 
@@ -265,8 +527,7 @@ private fun GuideStatusOverlay(
     arState: ArMeasurementState,
     feedbackState: FeedbackUiState,
     onCameraClick: () -> Unit,
-    onSettingsClick: () -> Unit,
-    onReplayTestClick: () -> Unit,
+    onMapClick: () -> Unit,
 ) {
     val palette = guidePalette(feedbackState.alertLevel, feedbackState.sensorStatus)
     Box(
@@ -317,29 +578,20 @@ private fun GuideStatusOverlay(
         )
 
         Column(
-            modifier = Modifier.align(Alignment.BottomEnd),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 6.dp, bottom = 18.dp),
             horizontalAlignment = Alignment.End,
         ) {
-            Text(
-                text = guideSensorStatus(feedbackState.sensorStatus),
-                color = palette.foreground.copy(alpha = 0.82f),
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
+            GuideActionChip(
+                text = "길찾기",
+                onClick = onMapClick,
             )
             Spacer(modifier = Modifier.height(10.dp))
             GuideActionChip(
                 text = "카메라 보기",
                 onClick = onCameraClick,
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            GuideActionChip(
-                text = "설정",
-                onClick = onSettingsClick,
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            GuideActionChip(
-                text = "영상 리플레이 테스트",
-                onClick = onReplayTestClick,
+                modifier = Modifier.width(112.dp),
             )
         }
     }
@@ -348,7 +600,6 @@ private fun GuideStatusOverlay(
 @Composable
 private fun CameraUiControls(
     onGuideClick: () -> Unit,
-    onSettingsClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -358,11 +609,6 @@ private fun CameraUiControls(
         GuideActionChip(
             text = "큰 화면",
             onClick = onGuideClick,
-        )
-        Spacer(modifier = Modifier.height(10.dp))
-        GuideActionChip(
-            text = "설정",
-            onClick = onSettingsClick,
         )
     }
 }
@@ -378,6 +624,7 @@ private fun GuideActionChip(
         color = Color.White,
         fontSize = 16.sp,
         fontWeight = FontWeight.Bold,
+        textAlign = TextAlign.Center,
         modifier = modifier
             .background(Color(0x99121820), RoundedCornerShape(18.dp))
             .clickable(onClick = onClick)
@@ -452,8 +699,18 @@ private fun guideSensorStatus(status: FeedbackSensorStatus): String {
 private fun MeasurementOverlay(
     state: ArMeasurementState,
     feedbackState: FeedbackUiState,
+    debugFlags: DebugPipelineFlags,
+    onDebugFlagsChanged: (DebugPipelineFlags) -> Unit,
+    onPlaneMeshDebugChanged: (Boolean) -> Unit,
 ) {
     var debugVisible by remember { mutableStateOf(false) }
+
+    LaunchedEffect(debugVisible, debugFlags.arCoreHitTestEnabled) {
+        onPlaneMeshDebugChanged(debugVisible && debugFlags.arCoreHitTestEnabled)
+    }
+    DisposableEffect(Unit) {
+        onDispose { onPlaneMeshDebugChanged(false) }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         ObjectDetectionOverlay(
@@ -556,8 +813,24 @@ private fun MeasurementOverlay(
         )
 
         if (debugVisible) {
+            if (debugFlags.floorSegmentationEnabled) {
+                FloorSegmentationOverlay(
+                    classMask = state.semanticClassMask,
+                    columns = state.floorOverlayColumns,
+                    confidence = state.floorOverlayConfidence,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+            if (debugFlags.rawDepthEnabled) {
+                DepthGridOverlay(
+                    cells = state.depthGridCells,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             DebugOverlay(
                 state = state,
+                debugFlags = debugFlags,
+                onDebugFlagsChanged = onDebugFlagsChanged,
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(start = 14.dp, top = 170.dp),
@@ -587,165 +860,12 @@ private fun OverlayToggleChip(
     )
 }
 
-private data class VoxelOverlayCluster(
-    val hullPoints: List<Offset>,
-    val averageOccupancy: Float,
-    val averageConfidence: Float,
-    val pointCount: Int,
-)
-
-private fun cross(o: Offset, a: Offset, b: Offset): Float {
-    return ((a.x - o.x) * (b.y - o.y)) - ((a.y - o.y) * (b.x - o.x))
-}
-
-private fun convexHull(points: List<Offset>): List<Offset> {
-    if (points.size <= 3) return points.distinct()
-
-    val sorted = points
-        .distinctBy { "${it.x},${it.y}" }
-        .sortedWith(compareBy<Offset> { it.x }.thenBy { it.y })
-
-    if (sorted.size <= 3) return sorted
-
-    val lower = mutableListOf<Offset>()
-    sorted.forEach { point ->
-        while (lower.size >= 2 && cross(lower[lower.size - 2], lower.last(), point) <= 0f) {
-            lower.removeAt(lower.lastIndex)
-        }
-        lower += point
-    }
-
-    val upper = mutableListOf<Offset>()
-    for (index in sorted.indices.reversed()) {
-        val point = sorted[index]
-        while (upper.size >= 2 && cross(upper[upper.size - 2], upper.last(), point) <= 0f) {
-            upper.removeAt(upper.lastIndex)
-        }
-        upper += point
-    }
-
-    lower.removeAt(lower.lastIndex)
-    upper.removeAt(upper.lastIndex)
-    return lower + upper
-}
-
-private fun clusterVoxelOverlayPoints(
-    points: List<VoxelOverlayPointUi>,
-): List<VoxelOverlayCluster> {
-    if (points.isEmpty()) return emptyList()
-
-    val remaining = points.toMutableList()
-    val clusters = mutableListOf<VoxelOverlayCluster>()
-    val xThreshold = 0.07f
-    val yThreshold = 0.09f
-
-    while (remaining.isNotEmpty()) {
-        val seed = remaining.removeAt(0)
-        val clusterPoints = mutableListOf(seed)
-        var index = 0
-        while (index < clusterPoints.size) {
-            val current = clusterPoints[index]
-            val iterator = remaining.iterator()
-            while (iterator.hasNext()) {
-                val candidate = iterator.next()
-                if (
-                    abs(candidate.xRatio - current.xRatio) <= xThreshold &&
-                    abs(candidate.yRatio - current.yRatio) <= yThreshold
-                ) {
-                    clusterPoints += candidate
-                    iterator.remove()
-                }
-            }
-            index += 1
-        }
-
-        if (clusterPoints.size < 6) continue
-
-        var occupancySum = 0f
-        var confidenceSum = 0f
-
-        clusterPoints.forEach { point ->
-            occupancySum += point.occupancyScore
-            confidenceSum += point.confidenceScore
-        }
-
-        val centerX = clusterPoints.map { it.xRatio }.average().toFloat()
-        val centerY = clusterPoints.map { it.yRatio }.average().toFloat()
-        val expandedPoints = clusterPoints.map { point ->
-            val dx = point.xRatio - centerX
-            val dy = point.yRatio - centerY
-            Offset(
-                x = (point.xRatio + (dx * 0.18f)).coerceIn(0f, 1f),
-                y = (point.yRatio + (dy * 0.18f)).coerceIn(0f, 1f),
-            )
-        }
-        val hull = convexHull(expandedPoints)
-        if (hull.size < 3) continue
-
-        clusters += VoxelOverlayCluster(
-            hullPoints = hull,
-            averageOccupancy = occupancySum / clusterPoints.size,
-            averageConfidence = confidenceSum / clusterPoints.size,
-            pointCount = clusterPoints.size,
-        )
-    }
-
-    return clusters.sortedByDescending { it.pointCount }
-}
-
-@Composable
-private fun VoxelClusterOverlay(
-    points: List<VoxelOverlayPointUi>,
-    modifier: Modifier = Modifier,
-) {
-    val clusters = remember(points) { clusterVoxelOverlayPoints(points).take(12) }
-
-    Canvas(modifier = modifier) {
-        clusters.forEach { cluster ->
-            val fillColor = when {
-                cluster.averageOccupancy >= 0.55f -> Color(0x4DFF8E8E)
-                cluster.averageOccupancy >= 0.28f -> Color(0x4DFFC870)
-                else -> Color(0x407A8794)
-            }.copy(alpha = 0.18f + (cluster.averageConfidence * 0.28f))
-            val borderColor = when {
-                cluster.averageOccupancy >= 0.55f -> Color(0xCCFF8E8E)
-                cluster.averageOccupancy >= 0.28f -> Color(0xCCFFC870)
-                else -> Color(0xAA9AA7B4)
-            }.copy(alpha = 0.45f + (cluster.averageConfidence * 0.35f))
-
-            val path = Path().apply {
-                cluster.hullPoints.forEachIndexed { index, point ->
-                    val x = point.x * size.width
-                    val y = point.y * size.height
-                    if (index == 0) {
-                        moveTo(x, y)
-                    } else {
-                        lineTo(x, y)
-                    }
-                }
-                close()
-            }
-
-            drawPath(
-                path = path,
-                color = fillColor,
-            )
-            drawPath(
-                path = path,
-                color = borderColor,
-                style = Stroke(width = 3f),
-            )
-        }
-    }
-}
-
 @Composable
 private fun ObjectDetectionOverlay(
     detections: List<ObjectOverlayDetection>,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier = modifier) {
-        val boxStrokeColor = Color(0xFFFFB648)
         val labelBackground = Color(0xCC121820)
 
         detections.forEach { detection ->
@@ -759,15 +879,11 @@ private fun ObjectDetectionOverlay(
                     .offset(x = boxLeft, y = boxTop)
                     .width(boxWidth)
                     .height(boxHeight)
-                    .border(2.dp, boxStrokeColor, RoundedCornerShape(8.dp)),
+                    .border(2.dp, Color(0xFFFFB648), RoundedCornerShape(8.dp)),
             ) {
                 Text(
                     text = buildString {
                         append(presentableLabel(detection.label))
-                        detection.distanceMeters?.let {
-                            append(" ")
-                            append(formatMetersShort(it, detection.distanceIsReference))
-                        }
                         detection.objectTimeToCollisionSeconds?.let {
                             append(" TTC ")
                             append(formatSeconds(it))
@@ -798,8 +914,146 @@ private fun ObjectDetectionOverlay(
 }
 
 @Composable
+private fun FloorSegmentationOverlay(
+    classMask: SemanticClassMaskOverlay?,
+    columns: List<FloorOverlayColumn>,
+    confidence: Float,
+    modifier: Modifier = Modifier,
+) {
+    if (classMask == null && (columns.size < 2 || confidence <= 0f)) return
+    val classMaskImage = remember(classMask) {
+        classMask?.toImageBitmap()
+    }
+
+    Canvas(modifier = modifier) {
+        if (classMaskImage != null) {
+            drawImage(
+                image = classMaskImage,
+                dstSize = IntSize(
+                    width = size.width.toInt().coerceAtLeast(1),
+                    height = size.height.toInt().coerceAtLeast(1),
+                ),
+            )
+            return@Canvas
+        }
+
+        val sortedColumns = columns.sortedBy { it.xRatio }
+        val floorPath = Path()
+        val first = sortedColumns.first()
+        floorPath.moveTo(
+            first.xRatio.coerceIn(0f, 1f) * size.width,
+            first.boundaryYRatio.coerceIn(0f, 1f) * size.height,
+        )
+        sortedColumns.drop(1).forEach { column ->
+            floorPath.lineTo(
+                column.xRatio.coerceIn(0f, 1f) * size.width,
+                column.boundaryYRatio.coerceIn(0f, 1f) * size.height,
+            )
+        }
+        floorPath.lineTo(size.width, size.height)
+        floorPath.lineTo(0f, size.height)
+        floorPath.close()
+
+        drawPath(
+            path = floorPath,
+            color = Color(0x5536D399),
+        )
+
+        val boundaryPath = Path()
+        boundaryPath.moveTo(
+            first.xRatio.coerceIn(0f, 1f) * size.width,
+            first.boundaryYRatio.coerceIn(0f, 1f) * size.height,
+        )
+        sortedColumns.drop(1).forEach { column ->
+            boundaryPath.lineTo(
+                column.xRatio.coerceIn(0f, 1f) * size.width,
+                column.boundaryYRatio.coerceIn(0f, 1f) * size.height,
+            )
+        }
+        drawPath(
+            path = boundaryPath,
+            color = Color(0xCC5FFFD0),
+            style = Stroke(width = 4f),
+        )
+    }
+}
+
+private fun SemanticClassMaskOverlay.toImageBitmap() =
+    Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+        val pixels = IntArray(width * height) { index ->
+            semanticClassArgb(if (index in classIds.indices) classIds[index] else -1)
+        }
+        setPixels(pixels, 0, width, 0, 0, width, height)
+    }.asImageBitmap()
+
+private fun semanticClassArgb(classId: Int): Int {
+    return when (classId) {
+        0 -> 0x66808080 // road
+        1 -> 0x66F4D03F // sidewalk
+        2 -> 0x668E44AD // building
+        3 -> 0x66A04000 // wall
+        4 -> 0x66D35400 // fence
+        5 -> 0x66E74C3C // pole
+        6 -> 0x66F5B7B1 // traffic light
+        7 -> 0x66F1948A // traffic sign
+        8 -> 0x662ECC71 // vegetation
+        9 -> 0x6658D68D // terrain
+        10 -> 0x665DADE2 // sky
+        11 -> 0x66FF4D6D // person
+        12 -> 0x66FF85A1 // rider
+        13 -> 0x663498DB // car
+        14 -> 0x662E86C1 // truck
+        15 -> 0x662876A6 // bus
+        16 -> 0x661F618D // train
+        17 -> 0x66F39C12 // motorcycle
+        18 -> 0x66F7DC6F // bicycle
+        else -> 0x33000000
+    }
+}
+
+@Composable
+private fun DepthGridOverlay(
+    cells: List<DepthGridCell>,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier = modifier) {
+        val cellWidth = maxWidth / 4
+        val cellHeight = maxHeight / 4
+        val cellsByPosition = cells.associateBy { it.column to it.row }
+
+        for (row in 0 until 4) {
+            for (column in 0 until 4) {
+                val cell = cellsByPosition[column to row]
+                val distance = cell?.distanceMeters
+                Box(
+                    modifier = Modifier
+                        .offset(x = cellWidth * column, y = cellHeight * row)
+                        .width(cellWidth)
+                        .height(cellHeight)
+                        .border(1.dp, Color(0x66FFFFFF)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = distance?.let(::formatMetersShort) ?: "--",
+                        color = Color.White,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .background(depthGridColor(distance), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun DebugOverlay(
     state: ArMeasurementState,
+    debugFlags: DebugPipelineFlags,
+    onDebugFlagsChanged: (DebugPipelineFlags) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -811,6 +1065,49 @@ private fun DebugOverlay(
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
         Text("AR", color = Color.White)
+        Spacer(modifier = Modifier.height(6.dp))
+        Text("Pipeline", color = Color(0xFFB7F7CE), fontSize = 12.sp)
+        DebugToggleRow(
+            label = "YOLO",
+            enabled = debugFlags.yoloEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(yoloEnabled = !debugFlags.yoloEnabled)) },
+        )
+        DebugToggleRow(
+            label = "Floor",
+            enabled = debugFlags.floorSegmentationEnabled,
+            onClick = {
+                onDebugFlagsChanged(
+                    debugFlags.copy(floorSegmentationEnabled = !debugFlags.floorSegmentationEnabled),
+                )
+            },
+        )
+        DebugToggleRow(
+            label = "AR hit",
+            enabled = debugFlags.arCoreHitTestEnabled,
+            onClick = {
+                onDebugFlagsChanged(debugFlags.copy(arCoreHitTestEnabled = !debugFlags.arCoreHitTestEnabled))
+            },
+        )
+        DebugToggleRow(
+            label = "Depth",
+            enabled = debugFlags.rawDepthEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(rawDepthEnabled = !debugFlags.rawDepthEnabled)) },
+        )
+        DebugToggleRow(
+            label = "Map",
+            enabled = debugFlags.localMapEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(localMapEnabled = !debugFlags.localMapEnabled)) },
+        )
+        DebugToggleRow(
+            label = "Cross",
+            enabled = debugFlags.crosswalkEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(crosswalkEnabled = !debugFlags.crosswalkEnabled)) },
+        )
+        DebugToggleRow(
+            label = "VLM",
+            enabled = debugFlags.vlmEnabled,
+            onClick = { onDebugFlagsChanged(debugFlags.copy(vlmEnabled = !debugFlags.vlmEnabled)) },
+        )
         Spacer(modifier = Modifier.height(4.dp))
         WorldMapMiniMap(state = state)
         Spacer(modifier = Modifier.height(6.dp))
@@ -863,6 +1160,16 @@ private fun DebugOverlay(
             "Crosswalk ${if (state.crosswalkDetected) "yes" else "no"} ${formatMapScore(state.crosswalkScore)} stripes ${state.crosswalkStripeCount} yolo ${formatMapScore(state.crosswalkYoloConfidence)} ${state.crosswalkModeLabel}",
             color = if (state.crosswalkDetected) Color(0xFFB6E7FF) else Color(0xFFD9E2EA),
         )
+        if (state.vlmModelName.isNotBlank()) {
+            Text(
+                "VLM ${state.vlmModelName} ${state.vlmRiskLabel} ${state.vlmConfidenceScore}%",
+                color = if (state.vlmModelName.contains("fallback", ignoreCase = true)) {
+                    Color(0xFFFFE08B)
+                } else {
+                    Color(0xFFB6E7FF)
+                },
+            )
+        }
         Text(
             state.statusLabel,
             color = when (state.statusLevel) {
@@ -875,6 +1182,36 @@ private fun DebugOverlay(
         if (state.note.isNotBlank()) {
             Text(state.note, color = Color(0xFFD9E2EA))
         }
+    }
+}
+
+@Composable
+private fun DebugToggleRow(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = Color(0xFFD9E2EA), fontSize = 12.sp)
+        Text(
+            text = if (enabled) "ON" else "OFF",
+            color = Color.White,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier
+                .background(
+                    if (enabled) Color(0xBF15803D) else Color(0xBFB91C1C),
+                    RoundedCornerShape(10.dp),
+                )
+                .clickable(onClick = onClick)
+                .padding(horizontal = 9.dp, vertical = 4.dp),
+        )
     }
 }
 
@@ -934,6 +1271,16 @@ private fun presentableRisk(riskLabel: String): Pair<String, Color> {
         "watch" -> "주의" to Color(0xFFFFDB7A)
         "stable" -> "안전" to Color(0xFF96E2B5)
         else -> "주의" to Color(0xFFD8E3EE)
+    }
+}
+
+private fun depthGridColor(distanceMeters: Float?): Color {
+    val distance = distanceMeters ?: return Color(0xFFFFB648)
+    return when {
+        distance < 0.8f -> Color(0xDDE85D75)
+        distance < 1.5f -> Color(0xDDDDAA45)
+        distance < 3f -> Color(0xDD5CBF88)
+        else -> Color(0xDD375D7A)
     }
 }
 
@@ -1056,103 +1403,6 @@ private fun WorldMapMiniMap(
 }
 
 @Composable
-private fun VoxelMiniMap(state: ArMeasurementState) {
-    Box(
-        modifier = Modifier
-            .width(150.dp)
-            .height(150.dp)
-            .background(Color(0x22212A34), RoundedCornerShape(8.dp)),
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val halfRange = state.voxelRangeMeters.coerceAtLeast(0.1f)
-            drawRect(Color(0x163A4654))
-
-            state.voxelColumns.forEach { column ->
-                val xRatio = ((column.relativeX + halfRange) / (halfRange * 2f)).coerceIn(0f, 1f)
-                val zRatio = (1f - ((column.relativeZ + halfRange) / (halfRange * 2f))).coerceIn(0f, 1f)
-                val voxelSizePx = (size.minDimension * (state.voxelSizeMeters / (halfRange * 2f)))
-                    .coerceAtLeast(3f)
-                val heightInfluence = ((column.heightMeters + 0.4f) / 1.8f).coerceIn(0f, 1f)
-                val color = when {
-                    column.occupancyScore >= 0.55f -> Color(0xFFFF8E8E)
-                    column.occupancyScore >= 0.28f -> Color(0xFFFFC870)
-                    else -> Color(0xFF8C97A3)
-                }.copy(alpha = 0.28f + (column.confidenceScore * 0.42f) + (heightInfluence * 0.2f))
-                drawRect(
-                    color = color,
-                    topLeft = Offset(
-                        (size.width * xRatio) - (voxelSizePx * 0.5f),
-                        (size.height * zRatio) - (voxelSizePx * 0.5f),
-                    ),
-                    size = Size(
-                        voxelSizePx + (heightInfluence * 3f),
-                        voxelSizePx + (heightInfluence * 3f),
-                    ),
-                )
-            }
-
-            val centerX = size.width * 0.5f
-            val centerY = size.height * 0.5f
-            drawCircle(
-                color = Color.White,
-                radius = 5f,
-                center = Offset(centerX, centerY),
-            )
-            drawLine(
-                color = Color(0xFF8FC8FF),
-                start = Offset(centerX, centerY),
-                end = Offset(centerX, centerY - 22f),
-                strokeWidth = 4f,
-            )
-        }
-    }
-}
-
-@Composable
-private fun VoxelSideProfile(state: ArMeasurementState) {
-    Box(
-        modifier = Modifier
-            .width(150.dp)
-            .height(110.dp)
-            .background(Color(0x1F1F2933), RoundedCornerShape(8.dp)),
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val maxForward = state.voxelRangeMeters.coerceAtLeast(0.1f)
-            val minHeight = -1.5f
-            val maxHeight = 2.5f
-            drawRect(Color(0x143A4654))
-
-            state.voxelPoints.forEach { point ->
-                if (point.relativeZ !in 0f..maxForward) return@forEach
-                val zRatio = (point.relativeZ / maxForward).coerceIn(0f, 1f)
-                val yRatio = (1f - ((point.relativeY - minHeight) / (maxHeight - minHeight))).coerceIn(0f, 1f)
-                val voxelPx = (size.minDimension * (state.voxelSizeMeters / (maxForward + maxHeight))).coerceAtLeast(3f)
-                val color = when {
-                    point.occupancyScore >= 0.55f -> Color(0xFFFF8E8E)
-                    point.occupancyScore >= 0.28f -> Color(0xFFFFC870)
-                    else -> Color(0xFF8C97A3)
-                }.copy(alpha = 0.28f + (point.confidenceScore * 0.5f))
-                drawRect(
-                    color = color,
-                    topLeft = Offset(
-                        (size.width * zRatio) - (voxelPx * 0.5f),
-                        (size.height * yRatio) - (voxelPx * 0.5f),
-                    ),
-                    size = Size(voxelPx, voxelPx),
-                )
-            }
-
-            drawLine(
-                color = Color(0x55FFFFFF),
-                start = Offset(0f, size.height * 0.72f),
-                end = Offset(size.width, size.height * 0.72f),
-                strokeWidth = 2f,
-            )
-        }
-    }
-}
-
-@Composable
 private fun DirectionArrow(state: ArMeasurementState) {
     val arrow = when (state.suggestedDirection) {
         "left" -> "<"
@@ -1191,6 +1441,14 @@ private fun formatSeconds(seconds: Float): String {
 
 private fun formatMapScore(score: Float): String {
     return "${(score.coerceIn(0f, 1f) * 100f).toInt()}"
+}
+
+private fun formatPercent(value: Float): String {
+    return if (value < 9.95f) {
+        String.format("%.1f", value)
+    } else {
+        value.toInt().coerceIn(0, 100).toString()
+    }
 }
 
 private fun formatMetersShort(distanceMeters: Float, isReference: Boolean = false): String {

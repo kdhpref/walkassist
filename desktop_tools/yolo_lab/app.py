@@ -291,7 +291,7 @@ class MainWindow(QMainWindow):
         self.image_dir_edit = QLineEdit()
         self.label_dir_edit = QLineEdit()
         self.dataset_root_edit = QLineEdit()
-        self.model_edit = QLineEdit("yolov8n.pt")
+        self.model_edit = QLineEdit("yolo26n-seg.pt")
         self.yaml_edit = QLineEdit()
 
         self.image_list = QListWidget()
