@@ -51,17 +51,6 @@ data class DepthGridCell(
     val confidence: Float = 0f,
 )
 
-data class FloorOverlayColumn(
-    val xRatio: Float,
-    val boundaryYRatio: Float,
-)
-
-data class SemanticClassMaskOverlay(
-    val width: Int,
-    val height: Int,
-    val classIds: IntArray,
-)
-
 data class ArMeasurementState(
     val trackingLabel: String = "initializing",
     val trackingFailureLabel: String = "",
@@ -95,9 +84,6 @@ data class ArMeasurementState(
     val crosswalkModeLabel: String = "",
     val objectDetections: List<ObjectOverlayDetection> = emptyList(),
     val depthGridCells: List<DepthGridCell> = emptyList(),
-    val floorOverlayColumns: List<FloorOverlayColumn> = emptyList(),
-    val floorOverlayConfidence: Float = 0f,
-    val semanticClassMask: SemanticClassMaskOverlay? = null,
     val planeDetections: List<PlaneOverlayDetection> = emptyList(),
     val planePolygons: List<PlanePolygonOverlay> = emptyList(),
     val worldMapCells: List<WorldMapCellUi> = emptyList(),

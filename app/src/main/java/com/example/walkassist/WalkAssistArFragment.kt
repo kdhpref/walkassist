@@ -96,13 +96,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val confidence: Float,
     )
 
-    private data class FloorMaskState(
-        val segmentation: FloorSegmentationResult,
-        val imageWidth: Int,
-        val imageHeight: Int,
-        val timestampNanos: Long,
-    )
-
     private data class TtcRiskResult(
         val label: String,
         val timeToCollisionSeconds: Float?,
@@ -111,11 +104,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private data class ObjectMotionMemory(
         val centerXRatio: Float,
         val distanceMeters: Float?,
-        val timestampNanos: Long,
-    )
-
-    private data class CrosswalkVisionState(
-        val result: CrosswalkPatternResult,
         val timestampNanos: Long,
     )
 
@@ -146,9 +134,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
     private val objectAnalyzerDelegate = lazy { ObjectAnalyzer(requireContext().applicationContext) }
     private val objectAnalyzer by objectAnalyzerDelegate
-    private val floorSegmenterDelegate = lazy { ModelFloorSegmenter(requireContext().applicationContext) }
-    private val floorSegmenter by floorSegmenterDelegate
-    private val crosswalkPatternDetector by lazy { CrosswalkPatternDetector() }
     private val vlmSceneInterpreter by lazy { WalkAssistVlmFactory.create(requireContext().applicationContext) }
     private val vlmInvocationPolicy = VlmInvocationPolicy()
     private var oneShotOcrReader: OneShotOcrReader? = null
@@ -162,10 +147,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private val oneShotVlmInFlight = AtomicBoolean(false)
     private var lastDetectionStartedAtMs = 0L
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
-    @Volatile
-    private var lastFloorMaskState: FloorMaskState? = null
-    @Volatile
-    private var lastCrosswalkState: CrosswalkVisionState? = null
     @Volatile
     private var lastVlmVisionState: VlmVisionState? = null
     private val objectMotionMemory = mutableMapOf<Int, ObjectMotionMemory>()
@@ -425,9 +406,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 if (objectAnalyzerDelegate.isInitialized()) {
                     objectAnalyzer.close()
                 }
-                if (floorSegmenterDelegate.isInitialized()) {
-                    floorSegmenter.close()
-                }
             }.get(1, TimeUnit.SECONDS)
         }
         detectorExecutor.shutdownNow()
@@ -635,10 +613,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
         val pitchDownDegrees = computePitchDownDegrees(frame)
         val corridorHits = if (debugFlags.arCoreHitTestEnabled) sampleWorldCorridor(frame) else emptyList()
-        val floorMaskState = if (debugFlags.floorSegmentationEnabled) currentFloorMaskState(frame.timestamp) else null
-        val floorDebugMaskState =
-            if (debugFlags.floorSegmentationEnabled) currentFloorDebugMaskState(frame.timestamp) else null
-        val crosswalkState = if (debugFlags.crosswalkEnabled) currentCrosswalkState(frame.timestamp) else null
         val vlmVisionState = if (debugFlags.vlmEnabled) currentVlmVisionState(frame.timestamp) else null
         val rawDepthHits = if (debugFlags.rawDepthEnabled) sampleRawDepthCorridor(frame) else emptyList()
         val depthGridCells = if (debugFlags.rawDepthEnabled) sampleRawDepthGrid(frame) else emptyList()
@@ -698,9 +672,9 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             )
             .firstOrNull()
 
-        val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left", floorMaskState)
-        val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center", floorMaskState)
-        val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right", floorMaskState)
+        val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left")
+        val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center")
+        val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right")
 
         val floorDistance = listOfNotNull(leftLane.floor, centerLane.floor, rightLane.floor).minOrNull()
         val wallDistance = listOfNotNull(leftLane.wall, centerLane.wall, rightLane.wall).minOrNull()
@@ -831,16 +805,8 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 guidanceLabel = guidanceLabel,
                 statusLabel = statusLabel,
                 statusLevel = level,
-                crosswalkDetected = crosswalkState?.detected == true,
-                crosswalkScore = crosswalkState?.score ?: 0f,
-                crosswalkStripeCount = crosswalkState?.stripeCount ?: 0,
-                crosswalkYoloConfidence = crosswalkState?.yoloConfidence ?: 0f,
-                crosswalkModeLabel = crosswalkState?.modeLabel.orEmpty(),
                 objectDetections = overlayDetections,
                 depthGridCells = depthGridCells,
-                floorOverlayColumns = floorDebugMaskState?.toOverlayColumns().orEmpty(),
-                floorOverlayConfidence = floorDebugMaskState?.segmentation?.confidence ?: 0f,
-                semanticClassMask = floorDebugMaskState?.segmentation?.classMask?.toOverlayMask(),
                 planeDetections = emptyList(),
                 planePolygons = emptyList(),
                 worldMapCells = worldMapSnapshot,
@@ -892,13 +858,9 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val ocrRequested = oneShotOcrRequested.get()
         val vlmRequested = oneShotVlmRequested.get()
         val liveVlmStreaming = liveVlmSessionActive.get() && debugFlags.vlmEnabled
-        val backgroundVisionEnabled = debugFlags.yoloEnabled ||
-            debugFlags.floorSegmentationEnabled ||
-            debugFlags.crosswalkEnabled
+        val backgroundVisionEnabled = debugFlags.yoloEnabled
         if (!backgroundVisionEnabled && !ocrRequested && !vlmRequested && !liveVlmStreaming) {
             lastObjectDetections = emptyList()
-            lastFloorMaskState = null
-            lastCrosswalkState = null
             return
         }
         val now = SystemClock.elapsedRealtime()
@@ -914,7 +876,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             return
         }
         val rotationDegrees = displayRotationDegrees()
-        val localCrosswalkDetector = crosswalkPatternDetector
         val pitchRadians = Math.toRadians(computePitchDownDegrees(frame).toDouble()).toFloat()
         val arStateSnapshot = ArMeasurementBridge.state.value
 
@@ -963,48 +924,13 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 if (shouldRunOcr) {
                     ocrStarted = startOneShotOcr(bitmap)
                 }
-                val floorSegmentation = if (debugFlags.floorSegmentationEnabled) {
-                    val localFloorSegmenter = floorSegmenter
-                    localFloorSegmenter.segment(bitmap)
-                } else {
-                    null
-                }
-                lastFloorMaskState = floorSegmentation?.let {
-                    FloorMaskState(
-                        segmentation = it,
-                        imageWidth = bitmap.width,
-                        imageHeight = bitmap.height,
-                        timestampNanos = frame.timestamp,
-                    )
-                }
                 val localObjectAnalyzer = if (debugFlags.yoloEnabled) objectAnalyzer else null
                 val detectedObjects = if (localObjectAnalyzer?.isReady() == true) {
                     localObjectAnalyzer.detect(bitmap)
                 } else {
                     emptyList()
                 }
-                val yoloCrosswalkConfidence = detectedObjects
-                    .filter { it.label.equals("crosswalk", ignoreCase = true) }
-                    .maxOfOrNull { it.confidence } ?: 0f
-                lastCrosswalkState = if (debugFlags.crosswalkEnabled) {
-                    CrosswalkVisionState(
-                        result = localCrosswalkDetector.detect(
-                            bitmap = bitmap,
-                            floorSegmentation = floorSegmentation,
-                            yoloConfidence = yoloCrosswalkConfidence,
-                        ),
-                        timestampNanos = frame.timestamp,
-                    )
-                } else {
-                    null
-                }
-                val crosswalk = lastCrosswalkState?.result ?: CrosswalkPatternResult(
-                    detected = false,
-                    score = 0f,
-                    stripeCount = 0,
-                    yoloConfidence = 0f,
-                    modeLabel = "unavailable",
-                )
+                val crosswalk = EMPTY_CROSSWALK_RESULT
                 val trackedDetections = objectTracker.update(
                     detections = detectedObjects.map { detection ->
                         DetectedObjectResult(
@@ -1030,7 +956,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 val primaryAnalysis = FrameAnalysis(
                     detections = trackedDetections,
                     nearestObstacle = null,
-                    floorSegmentation = floorSegmentation,
+                    floorSegmentation = null,
                     pathMetrics = null,
                 )
                 val spatialFrame = SpatialFrame(
@@ -1298,13 +1224,10 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         hits: List<CorridorHit>,
         rawDepthHits: List<CorridorHit>,
         lane: String,
-        floorMaskState: FloorMaskState?,
     ): LaneDistances {
         val filtered = hits.filter { classifyLane(it.lateralMeters) == lane }
-        val obstacleHits = filtered.filter {
-            it.source != HitSource.FLOOR && !isInsideWalkableFloorMask(it, floorMaskState)
-        }
-        val rawDepth = robustLaneRawDepthDistance(rawDepthHits, lane, floorMaskState)
+        val obstacleHits = filtered.filter { it.source != HitSource.FLOOR }
+        val rawDepth = robustLaneRawDepthDistance(rawDepthHits, lane)
         val floor = filtered.filter { it.source == HitSource.FLOOR }.minOfOrNull { it.distanceMeters }
         val wall = obstacleHits.filter { it.source == HitSource.WALL }.minOfOrNull { it.distanceMeters }
         val depth = obstacleHits.filter { it.source == HitSource.DEPTH }.minOfOrNull { it.distanceMeters }
@@ -1320,11 +1243,9 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private fun robustLaneRawDepthDistance(
         rawDepthHits: List<CorridorHit>,
         lane: String,
-        floorMaskState: FloorMaskState?,
     ): Float? {
         val laneDistances = rawDepthHits
             .filter { classifyLane(it.lateralMeters) == lane }
-            .filterNot { isInsideWalkableFloorMask(it, floorMaskState) }
             .map { it.distanceMeters }
             .sorted()
 
@@ -1335,70 +1256,10 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         return laneDistances[percentileIndex]
     }
 
-    private fun currentFloorMaskState(frameTimestampNanos: Long): FloorMaskState? {
-        val state = lastFloorMaskState ?: return null
-        val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
-        return if (ageSeconds in 0f..2.0f && state.segmentation.confidence >= 0.25f) state else null
-    }
-
-    private fun currentFloorDebugMaskState(frameTimestampNanos: Long): FloorMaskState? {
-        val state = lastFloorMaskState ?: return null
-        val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
-        return if (ageSeconds in 0f..10.0f) state else null
-    }
-
-    private fun FloorMaskState.toOverlayColumns(): List<FloorOverlayColumn> {
-        val boundary = segmentation.boundaryYByColumn
-        if (boundary.isEmpty()) return emptyList()
-
-        return buildList {
-            for (column in boundary.indices) {
-                val boundaryY = boundary[column]
-                if (boundaryY < 0) continue
-                add(
-                    FloorOverlayColumn(
-                    xRatio = if (boundary.size == 1) 0f else column / (boundary.size - 1).toFloat(),
-                    boundaryYRatio = boundaryY / segmentation.height.toFloat(),
-                    ),
-                )
-            }
-        }
-    }
-
-    private fun SemanticClassMask.toOverlayMask(): SemanticClassMaskOverlay {
-        return SemanticClassMaskOverlay(
-            width = width,
-            height = height,
-            classIds = classIds,
-        )
-    }
-
-    private fun currentCrosswalkState(frameTimestampNanos: Long): CrosswalkPatternResult? {
-        val state = lastCrosswalkState ?: return null
-        val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
-        return if (ageSeconds in 0f..2.5f) state.result else null
-    }
-
     private fun currentVlmVisionState(frameTimestampNanos: Long): VlmVisionState? {
         val state = lastVlmVisionState ?: return null
         val ageSeconds = (frameTimestampNanos - state.timestampNanos) / 1_000_000_000f
         return if (ageSeconds in 0f..4.0f) state else null
-    }
-
-    private fun isInsideWalkableFloorMask(
-        hit: CorridorHit,
-        floorMaskState: FloorMaskState?,
-    ): Boolean {
-        val state = floorMaskState ?: return false
-        val imageX = hit.viewXRatio * state.imageWidth.toFloat()
-        val imageY = hit.viewYRatio * state.imageHeight.toFloat()
-        val floorBoundaryY = state.segmentation.boundaryYAt(
-            imageX = imageX,
-            imageWidth = state.imageWidth,
-            imageHeight = state.imageHeight,
-        ) ?: return false
-        val floorMarginPixels = state.imageHeight * 0.025f
-        return imageY >= floorBoundaryY - floorMarginPixels
     }
 
     private fun evaluateWorldMapLanes(

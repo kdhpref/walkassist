@@ -2,7 +2,6 @@
 
 import android.Manifest
 import android.content.Intent
-import android.graphics.Bitmap
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -48,15 +47,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.activity.viewModels
 import androidx.core.app.ActivityCompat
@@ -786,15 +781,6 @@ private fun MeasurementOverlay(
                     fontWeight = FontWeight.Medium,
                 )
             }
-            if (state.crosswalkDetected) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "횡단보도 감지 ${formatMapScore(state.crosswalkScore)}점",
-                    color = Color(0xFFB6E7FF),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-            }
             Spacer(modifier = Modifier.height(6.dp))
             Text(
                 text = state.statusLabel,
@@ -813,14 +799,6 @@ private fun MeasurementOverlay(
         )
 
         if (debugVisible) {
-            if (debugFlags.floorSegmentationEnabled) {
-                FloorSegmentationOverlay(
-                    classMask = state.semanticClassMask,
-                    columns = state.floorOverlayColumns,
-                    confidence = state.floorOverlayConfidence,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
             if (debugFlags.rawDepthEnabled) {
                 DepthGridOverlay(
                     cells = state.depthGridCells,
@@ -914,104 +892,6 @@ private fun ObjectDetectionOverlay(
 }
 
 @Composable
-private fun FloorSegmentationOverlay(
-    classMask: SemanticClassMaskOverlay?,
-    columns: List<FloorOverlayColumn>,
-    confidence: Float,
-    modifier: Modifier = Modifier,
-) {
-    if (classMask == null && (columns.size < 2 || confidence <= 0f)) return
-    val classMaskImage = remember(classMask) {
-        classMask?.toImageBitmap()
-    }
-
-    Canvas(modifier = modifier) {
-        if (classMaskImage != null) {
-            drawImage(
-                image = classMaskImage,
-                dstSize = IntSize(
-                    width = size.width.toInt().coerceAtLeast(1),
-                    height = size.height.toInt().coerceAtLeast(1),
-                ),
-            )
-            return@Canvas
-        }
-
-        val sortedColumns = columns.sortedBy { it.xRatio }
-        val floorPath = Path()
-        val first = sortedColumns.first()
-        floorPath.moveTo(
-            first.xRatio.coerceIn(0f, 1f) * size.width,
-            first.boundaryYRatio.coerceIn(0f, 1f) * size.height,
-        )
-        sortedColumns.drop(1).forEach { column ->
-            floorPath.lineTo(
-                column.xRatio.coerceIn(0f, 1f) * size.width,
-                column.boundaryYRatio.coerceIn(0f, 1f) * size.height,
-            )
-        }
-        floorPath.lineTo(size.width, size.height)
-        floorPath.lineTo(0f, size.height)
-        floorPath.close()
-
-        drawPath(
-            path = floorPath,
-            color = Color(0x5536D399),
-        )
-
-        val boundaryPath = Path()
-        boundaryPath.moveTo(
-            first.xRatio.coerceIn(0f, 1f) * size.width,
-            first.boundaryYRatio.coerceIn(0f, 1f) * size.height,
-        )
-        sortedColumns.drop(1).forEach { column ->
-            boundaryPath.lineTo(
-                column.xRatio.coerceIn(0f, 1f) * size.width,
-                column.boundaryYRatio.coerceIn(0f, 1f) * size.height,
-            )
-        }
-        drawPath(
-            path = boundaryPath,
-            color = Color(0xCC5FFFD0),
-            style = Stroke(width = 4f),
-        )
-    }
-}
-
-private fun SemanticClassMaskOverlay.toImageBitmap() =
-    Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
-        val pixels = IntArray(width * height) { index ->
-            semanticClassArgb(if (index in classIds.indices) classIds[index] else -1)
-        }
-        setPixels(pixels, 0, width, 0, 0, width, height)
-    }.asImageBitmap()
-
-private fun semanticClassArgb(classId: Int): Int {
-    return when (classId) {
-        0 -> 0x66808080 // road
-        1 -> 0x66F4D03F // sidewalk
-        2 -> 0x668E44AD // building
-        3 -> 0x66A04000 // wall
-        4 -> 0x66D35400 // fence
-        5 -> 0x66E74C3C // pole
-        6 -> 0x66F5B7B1 // traffic light
-        7 -> 0x66F1948A // traffic sign
-        8 -> 0x662ECC71 // vegetation
-        9 -> 0x6658D68D // terrain
-        10 -> 0x665DADE2 // sky
-        11 -> 0x66FF4D6D // person
-        12 -> 0x66FF85A1 // rider
-        13 -> 0x663498DB // car
-        14 -> 0x662E86C1 // truck
-        15 -> 0x662876A6 // bus
-        16 -> 0x661F618D // train
-        17 -> 0x66F39C12 // motorcycle
-        18 -> 0x66F7DC6F // bicycle
-        else -> 0x33000000
-    }
-}
-
-@Composable
 private fun DepthGridOverlay(
     cells: List<DepthGridCell>,
     modifier: Modifier = Modifier,
@@ -1073,15 +953,6 @@ private fun DebugOverlay(
             onClick = { onDebugFlagsChanged(debugFlags.copy(yoloEnabled = !debugFlags.yoloEnabled)) },
         )
         DebugToggleRow(
-            label = "Floor",
-            enabled = debugFlags.floorSegmentationEnabled,
-            onClick = {
-                onDebugFlagsChanged(
-                    debugFlags.copy(floorSegmentationEnabled = !debugFlags.floorSegmentationEnabled),
-                )
-            },
-        )
-        DebugToggleRow(
             label = "AR hit",
             enabled = debugFlags.arCoreHitTestEnabled,
             onClick = {
@@ -1097,11 +968,6 @@ private fun DebugOverlay(
             label = "Map",
             enabled = debugFlags.localMapEnabled,
             onClick = { onDebugFlagsChanged(debugFlags.copy(localMapEnabled = !debugFlags.localMapEnabled)) },
-        )
-        DebugToggleRow(
-            label = "Cross",
-            enabled = debugFlags.crosswalkEnabled,
-            onClick = { onDebugFlagsChanged(debugFlags.copy(crosswalkEnabled = !debugFlags.crosswalkEnabled)) },
         )
         DebugToggleRow(
             label = "VLM",
@@ -1155,10 +1021,6 @@ private fun DebugOverlay(
         Text(
             "Map R ${formatMapScore(state.worldMapRightOpenScore)}/${state.worldMapRightFreeSpaceMeters?.let(::formatMetersShort) ?: "-"}",
             color = Color(0xFFD9E2EA),
-        )
-        Text(
-            "Crosswalk ${if (state.crosswalkDetected) "yes" else "no"} ${formatMapScore(state.crosswalkScore)} stripes ${state.crosswalkStripeCount} yolo ${formatMapScore(state.crosswalkYoloConfidence)} ${state.crosswalkModeLabel}",
-            color = if (state.crosswalkDetected) Color(0xFFB6E7FF) else Color(0xFFD9E2EA),
         )
         if (state.vlmModelName.isNotBlank()) {
             Text(
