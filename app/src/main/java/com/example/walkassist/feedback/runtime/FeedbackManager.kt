@@ -20,6 +20,7 @@ class FeedbackManager(context: Context) {
     fun provideFeedback(
         request: FeedbackRequest,
         announcementView: TextView? = null,
+        queueSpeech: Boolean = false,
     ) {
         if (
             request.message.isBlank() &&
@@ -42,6 +43,7 @@ class FeedbackManager(context: Context) {
                 level = request.alertLevel,
                 announcementView = announcementView,
                 prioritySpeech = request.interruptCurrent || request.priority <= 2,
+                queueSpeech = queueSpeech,
             )
         }
     }
@@ -51,6 +53,7 @@ class FeedbackManager(context: Context) {
         level: FeedbackAlertLevel,
         announcementView: TextView? = null,
         prioritySpeech: Boolean = false,
+        queueSpeech: Boolean = false,
     ) {
         provideFeedback(
             message = message,
@@ -62,6 +65,7 @@ class FeedbackManager(context: Context) {
             ),
             announcementView = announcementView,
             prioritySpeech = prioritySpeech,
+            queueSpeech = queueSpeech,
         )
     }
 
@@ -71,6 +75,7 @@ class FeedbackManager(context: Context) {
         outputMode: FeedbackOutputMode,
         announcementView: TextView? = null,
         prioritySpeech: Boolean = false,
+        queueSpeech: Boolean = false,
     ) {
         if (message.isBlank() && !outputMode.useHaptic) return
 
@@ -82,14 +87,30 @@ class FeedbackManager(context: Context) {
                 message = message,
                 outputMode = outputMode,
                 distanceMeters = null,
-                interruptCurrent = prioritySpeech,
+                interruptCurrent = prioritySpeech && !queueSpeech,
             ),
             announcementView = announcementView,
+            queueSpeech = queueSpeech,
         )
     }
 
     fun stop() {
         hapticController.cancel()
+    }
+
+    fun stopSpeech() {
+        speechController.stopSpeaking()
+    }
+
+    fun speakQueued(
+        message: String,
+        level: FeedbackAlertLevel,
+    ) {
+        speechController.speak(
+            message = message,
+            level = level,
+            queueMode = TextToSpeech.QUEUE_ADD,
+        )
     }
 
     fun release() {
@@ -102,11 +123,21 @@ class FeedbackManager(context: Context) {
         level: FeedbackAlertLevel,
         announcementView: TextView?,
         prioritySpeech: Boolean,
+        queueSpeech: Boolean = false,
     ) {
         val announcedByTalkBack = accessibilityAnnouncer.announce(message, announcementView)
         if (announcedByTalkBack) return
 
         val now = SystemClock.elapsedRealtime()
+        if (queueSpeech) {
+            speechController.speak(
+                message = message,
+                level = level,
+                queueMode = TextToSpeech.QUEUE_ADD,
+            )
+            return
+        }
+
         if (prioritySpeech) {
             prioritySpeechProtectedUntilMs = now + PRIORITY_SPEECH_PROTECTION_MS
             speechController.speak(

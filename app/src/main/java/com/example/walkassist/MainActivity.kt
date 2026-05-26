@@ -134,6 +134,7 @@ class MainActivity : AppCompatActivity() {
                         feedbackState = feedbackState,
                         onOcrClick = ::requestOneShotOcr,
                         onVlmClick = ::requestOneShotVlm,
+                        onLiveGuideClick = ::requestLiveVlmGuidance,
                         vlmButtonText = liveVlmButtonText(),
                         onStopReplayRecording = ::stopArCoreReplayRecording,
                         onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
@@ -177,6 +178,12 @@ class MainActivity : AppCompatActivity() {
                 message = message,
                 level = FeedbackAlertLevel.CAUTION,
                 prioritySpeech = true,
+            )
+        }
+        fragment.onLiveVlmGuidanceResult = { message ->
+            feedbackManager.speakQueued(
+                message = message,
+                level = FeedbackAlertLevel.CAUTION,
             )
         }
         fragment.onLiveVlmStateChanged = { active ->
@@ -260,8 +267,32 @@ class MainActivity : AppCompatActivity() {
         fragment.requestOneShotVlm()
     }
 
+    private fun requestLiveVlmGuidance() {
+        feedbackManager.stopSpeech()
+        if (!WalkAssistSettings.debugPipelineFlags(this).vlmEnabled) {
+            feedbackManager.provideFeedback(
+                message = "디버그 설정에서 VLM 파이프라인이 꺼져 있습니다.",
+                level = FeedbackAlertLevel.CAUTION,
+            )
+            return
+        }
+        val fragment = arFragment
+            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.also(::configureArFragment)
+
+        if (fragment == null) {
+            feedbackManager.provideFeedback(
+                message = "Live 안내를 준비 중입니다. 잠시 후 다시 눌러 주세요.",
+                level = FeedbackAlertLevel.CAUTION,
+            )
+            return
+        }
+
+        fragment.requestLiveVlmGuidance()
+    }
+
     private fun liveVlmButtonText(): String {
-        val isLiveModel = WalkAssistSettings.vlmModelOption(this) == VlmModelOption.GEMINI_3_1_FLASH_LIVE_API
+        val isLiveModel = WalkAssistSettings.vlmModelOption(this) == VlmModelOption.GEMINI_2_5_FLASH_LIVE_API
         return if (isLiveModel && liveVlmActive) "VLM 종료" else "VLM 시작"
     }
 
@@ -341,6 +372,7 @@ private fun WalkAssistRootOverlay(
     feedbackState: FeedbackUiState,
     onOcrClick: () -> Unit,
     onVlmClick: () -> Unit,
+    onLiveGuideClick: () -> Unit,
     vlmButtonText: String,
     onStopReplayRecording: () -> Unit,
     onPlaneMeshDebugChanged: (Boolean) -> Unit,
@@ -435,6 +467,13 @@ private fun WalkAssistRootOverlay(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(start = 14.dp, bottom = 18.dp),
+        )
+        GuideActionChip(
+            text = "안내",
+            onClick = onLiveGuideClick,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 14.dp, bottom = 18.dp),
         )
     }
 }
@@ -805,6 +844,12 @@ private fun MeasurementOverlay(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+            if (debugFlags.rawDepthEnabled && debugFlags.walkingZoneDistanceEnabled) {
+                WalkingZoneDistanceOverlay(
+                    samples = state.walkingZoneDepthSamples,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             DebugOverlay(
                 state = state,
                 debugFlags = debugFlags,
@@ -930,6 +975,87 @@ private fun DepthGridOverlay(
 }
 
 @Composable
+private fun WalkingZoneDistanceOverlay(
+    samples: List<WalkingZoneDepthSample>,
+    modifier: Modifier = Modifier,
+) {
+    if (samples.isEmpty()) return
+
+    BoxWithConstraints(modifier = modifier) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val leftBoundary = size.width * 0.38f
+            val rightBoundary = size.width * 0.62f
+            val topY = size.height * 0.4f
+            val bottomY = size.height * 0.82f
+            drawRect(
+                color = Color(0x2222C55E),
+                topLeft = Offset(0f, topY),
+                size = Size(leftBoundary, bottomY - topY),
+            )
+            drawRect(
+                color = Color(0x2238BDF8),
+                topLeft = Offset(leftBoundary, topY),
+                size = Size(rightBoundary - leftBoundary, bottomY - topY),
+            )
+            drawRect(
+                color = Color(0x22F59E0B),
+                topLeft = Offset(rightBoundary, topY),
+                size = Size(size.width - rightBoundary, bottomY - topY),
+            )
+            drawLine(
+                color = Color(0xAAFFFFFF),
+                start = Offset(leftBoundary, topY),
+                end = Offset(leftBoundary, bottomY),
+                strokeWidth = 2f,
+            )
+            drawLine(
+                color = Color(0xAAFFFFFF),
+                start = Offset(rightBoundary, topY),
+                end = Offset(rightBoundary, bottomY),
+                strokeWidth = 2f,
+            )
+        }
+
+        samples.forEach { sample ->
+            val markerColor = walkingZoneSampleColor(sample.distanceMeters)
+            val x = maxWidth * sample.xRatio
+            val y = maxHeight * sample.yRatio
+            if (sample.distanceMeters == null) {
+                Box(
+                    modifier = Modifier
+                        .offset(x = x - 4.dp, y = y - 4.dp)
+                        .size(8.dp)
+                        .border(1.dp, Color(0x99FFFFFF), RoundedCornerShape(999.dp))
+                        .background(Color(0x55121820), RoundedCornerShape(999.dp)),
+                )
+            } else {
+                Text(
+                    text = formatMetersShort(sample.distanceMeters),
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .offset(x = x - 18.dp, y = y - 10.dp)
+                        .width(36.dp)
+                        .background(markerColor, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 3.dp, vertical = 2.dp),
+                )
+            }
+        }
+    }
+}
+
+private fun walkingZoneSampleColor(distanceMeters: Float?): Color {
+    return when {
+        distanceMeters == null -> Color(0x66121820)
+        distanceMeters < 1.2f -> Color(0xEADC2626)
+        distanceMeters < 2.5f -> Color(0xEAF59E0B)
+        else -> Color(0xEA15803D)
+    }
+}
+
+@Composable
 private fun DebugOverlay(
     state: ArMeasurementState,
     debugFlags: DebugPipelineFlags,
@@ -940,7 +1066,7 @@ private fun DebugOverlay(
         modifier = Modifier
             .then(modifier)
             .wrapContentWidth()
-            .width(170.dp)
+            .width(220.dp)
             .background(Color(0x7A141B24), RoundedCornerShape(12.dp))
             .padding(horizontal = 10.dp, vertical = 8.dp),
     ) {
@@ -965,6 +1091,15 @@ private fun DebugOverlay(
             onClick = { onDebugFlagsChanged(debugFlags.copy(rawDepthEnabled = !debugFlags.rawDepthEnabled)) },
         )
         DebugToggleRow(
+            label = "보행구역 거리측정",
+            enabled = debugFlags.walkingZoneDistanceEnabled,
+            onClick = {
+                onDebugFlagsChanged(
+                    debugFlags.copy(walkingZoneDistanceEnabled = !debugFlags.walkingZoneDistanceEnabled),
+                )
+            },
+        )
+        DebugToggleRow(
             label = "Map",
             enabled = debugFlags.localMapEnabled,
             onClick = { onDebugFlagsChanged(debugFlags.copy(localMapEnabled = !debugFlags.localMapEnabled)) },
@@ -984,10 +1119,6 @@ private fun DebugOverlay(
             Text("Tracking issue: ${state.trackingFailureLabel}", color = Color(0xFFFFE08B))
         }
         Text("Pitch ${state.pitchDownDegrees.toInt()}deg", color = Color(0xFFD9E2EA))
-        Text(
-            "Planes: ${state.horizontalPlaneCount}/${state.verticalPlaneCount}",
-            color = Color(0xFFD9E2EA),
-        )
         Text(
             state.guidanceLabel,
             color = when (state.statusLevel) {

@@ -36,6 +36,14 @@ data class VlmModelPreparationStatus(
     val explanation: String,
 )
 
+data class LiveVlmTimingEvent(
+    val eventName: String,
+    val elapsedMs: Long,
+    val audioBytes: Int = 0,
+    val transcriptChars: Int = 0,
+    val errorMessage: String? = null,
+)
+
 interface VlmSceneInterpreter {
     fun interpret(
         frame: SpatialFrame,
@@ -46,9 +54,12 @@ interface VlmSceneInterpreter {
     fun startLiveSession(
         onText: (String) -> Unit,
         onError: (String) -> Unit,
+        onTiming: (LiveVlmTimingEvent) -> Unit = {},
     ): Boolean = false
 
     fun streamLiveFrame(frame: SpatialFrame) = Unit
+
+    fun requestLiveGuidance(): Boolean = false
 
     fun stopLiveSession() = Unit
 

@@ -105,6 +105,12 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
         abandonAudioFocus()
     }
 
+    fun stopSpeaking() {
+        pendingSpeech = null
+        tts?.stop()
+        abandonAudioFocus()
+    }
+
     private fun requestAudioFocus() {
         try {
             audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
@@ -146,8 +152,8 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
     private fun rateFor(level: FeedbackAlertLevel): Float {
         return when (level) {
             FeedbackAlertLevel.SAFE -> 0.95f
-            FeedbackAlertLevel.CAUTION -> 1.02f
-            FeedbackAlertLevel.DANGER -> 1.12f
+            FeedbackAlertLevel.CAUTION -> 1.12f
+            FeedbackAlertLevel.DANGER -> 1.18f
         }
     }
 

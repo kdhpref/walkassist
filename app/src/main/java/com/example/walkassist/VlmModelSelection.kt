@@ -16,8 +16,8 @@ enum class VlmModelOption(
         displayName = "Gemini API",
         florenceVariant = null,
     ),
-    GEMINI_3_1_FLASH_LIVE_API(
-        preferenceValue = "gemini_3_1_flash_live_api",
+    GEMINI_2_5_FLASH_LIVE_API(
+        preferenceValue = "gemini_2_5_flash_live_api",
         displayName = "Gemini 2.5 Flash Live",
         florenceVariant = null,
     ),
@@ -34,6 +34,7 @@ enum class VlmModelOption(
 
     companion object {
         fun fromPreferenceValue(value: String): VlmModelOption {
+            if (value == "gemini_3_1_flash_live_api") return GEMINI_2_5_FLASH_LIVE_API
             return values().firstOrNull { it.preferenceValue == value } ?: GEMINI_API
         }
     }

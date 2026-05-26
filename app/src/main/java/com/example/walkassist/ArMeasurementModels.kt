@@ -51,6 +51,14 @@ data class DepthGridCell(
     val confidence: Float = 0f,
 )
 
+data class WalkingZoneDepthSample(
+    val xRatio: Float,
+    val yRatio: Float,
+    val distanceMeters: Float?,
+    val confidence: Float = 0f,
+    val lane: String? = null,
+)
+
 data class ArMeasurementState(
     val trackingLabel: String = "initializing",
     val trackingFailureLabel: String = "",
@@ -75,7 +83,7 @@ data class ArMeasurementState(
     val timeToCollisionSeconds: Float? = null,
     val riskLabel: String = "unknown",
     val guidanceLabel: String = "Scanning surroundings.",
-    val statusLabel: String = "Move the phone slowly to detect floor and wall planes.",
+    val statusLabel: String = "Move the phone slowly while depth samples stabilize.",
     val statusLevel: ArStatusLevel = ArStatusLevel.INFO,
     val crosswalkDetected: Boolean = false,
     val crosswalkScore: Float = 0f,
@@ -84,6 +92,7 @@ data class ArMeasurementState(
     val crosswalkModeLabel: String = "",
     val objectDetections: List<ObjectOverlayDetection> = emptyList(),
     val depthGridCells: List<DepthGridCell> = emptyList(),
+    val walkingZoneDepthSamples: List<WalkingZoneDepthSample> = emptyList(),
     val planeDetections: List<PlaneOverlayDetection> = emptyList(),
     val planePolygons: List<PlanePolygonOverlay> = emptyList(),
     val worldMapCells: List<WorldMapCellUi> = emptyList(),

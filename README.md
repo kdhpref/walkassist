@@ -46,19 +46,19 @@ cmd /c gradlew.bat installDebug
 The VLM button uses the model selected in the app settings. Available choices are:
 
 - Gemini API
-- Gemini 3.1 Flash Live Preview
+- Gemini 2.5 Flash Live Preview
 - Florence-2 INT4 from `onnx-community/Florence-2-base-ft`
 - Florence-2 INT8 from `onnx-community/Florence-2-base-ft`
 
 Gemini sends the current camera image to the selected Gemini API option when
 the user presses the VLM button.
 
-When Gemini 3.1 Flash Live Preview is selected, the app runs a minimal Live API
-WebSocket demo: it opens the official `BidiGenerateContent` endpoint, sends the
-initial `setup` message with audio output transcription enabled, then sends the
-current camera image plus one short text turn through `clientContent`. It
-displays the returned output transcription, does not keep a continuous session
-open, and does not use the microphone.
+When Gemini 2.5 Flash Live Preview is selected, the app runs a minimal Live API
+WebSocket flow: it opens the official `BidiGenerateContent` endpoint, sends the
+initial `setup` message, continuously streams downscaled camera frames through
+`realtimeInput.video`, and sends one short text turn through `clientContent`
+only when the guidance button is pressed. It displays the returned output
+transcription text and does not use the microphone.
 
 Put the API key in `local.properties`:
 

@@ -321,7 +321,7 @@ class GuideSettingsActivity : AppCompatActivity() {
         val option = WalkAssistSettings.vlmModelOption(this)
         val readiness = when (option) {
             VlmModelOption.GEMINI_API,
-            VlmModelOption.GEMINI_3_1_FLASH_LIVE_API,
+            VlmModelOption.GEMINI_2_5_FLASH_LIVE_API,
             -> if (BuildConfig.GEMINI_API_KEY.isBlank()) {
                 "API key needed"
             } else {
@@ -343,7 +343,7 @@ class GuideSettingsActivity : AppCompatActivity() {
         val labels = options.map { option ->
             when (option) {
                 VlmModelOption.GEMINI_API,
-                VlmModelOption.GEMINI_3_1_FLASH_LIVE_API,
+                VlmModelOption.GEMINI_2_5_FLASH_LIVE_API,
                 -> if (BuildConfig.GEMINI_API_KEY.isBlank()) {
                     "${option.displayName} - API key needed"
                 } else {
