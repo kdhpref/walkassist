@@ -1,5 +1,7 @@
 ﻿package com.example.walkassist
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.Image
 import android.net.Uri
@@ -12,6 +14,7 @@ import android.view.LayoutInflater
 import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
+import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import com.example.walkassist.map.RouteCameraGuidance
 import com.example.walkassist.map.RouteCameraGuidanceEngine
@@ -427,21 +430,28 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
     override fun onResume() {
         super.onResume()
+        if (!hasCameraPermission()) {
+            publishCameraPermissionRequired()
+            return
+        }
         ensureSession()
         glSurfaceView?.onResume()
+        resumeSession()
+    }
+
+    fun retrySessionAfterCameraPermissionGranted() {
+        if (!isAdded || !hasCameraPermission()) return
+        ensureSession()
+        glSurfaceView?.onResume()
+        resumeSession()
+    }
+
+    private fun resumeSession() {
         runCatching {
             arSession?.resume()
         }.onFailure { error ->
             Log.e(TAG, "Failed to resume ARCore session", error)
-            ArMeasurementBridge.publish(
-                ArMeasurementState(
-                    trackingLabel = "unavailable",
-                    guidanceLabel = "ARCore session failed to start.",
-                    statusLabel = error.message ?: "ARCore resume failed.",
-                    statusLevel = ArStatusLevel.WARNING,
-                    note = "Check Google Play Services for AR and camera permission.",
-                ),
-            )
+            publishSessionStartFailure(error)
         }
     }
 
@@ -463,6 +473,10 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
     private fun ensureSession() {
         if (arSession != null) return
+        if (!hasCameraPermission()) {
+            publishCameraPermissionRequired()
+            return
+        }
 
         try {
             val installStatus = ArCoreApk.getInstance().requestInstall(requireActivity(), !installRequested)
@@ -483,6 +497,9 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 )
                 configureRecordingIfRequested(session)
             }
+        } catch (error: SecurityException) {
+            Log.e(TAG, "ARCore session needs camera permission", error)
+            publishCameraPermissionRequired()
         } catch (error: UnavailableException) {
             Log.e(TAG, "ARCore is unavailable", error)
             ArMeasurementBridge.publish(
@@ -495,6 +512,42 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 ),
             )
         }
+    }
+
+    private fun hasCameraPermission(): Boolean {
+        val context = context ?: return false
+        return ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun publishCameraPermissionRequired() {
+        ArMeasurementBridge.publish(
+            ArMeasurementState(
+                trackingLabel = "permission",
+                guidanceLabel = "카메라 권한을 허용하면 전방 안내를 시작합니다.",
+                statusLabel = "Camera permission required.",
+                statusLevel = ArStatusLevel.WARNING,
+                note = "Grant CAMERA permission before starting ARCore.",
+            ),
+        )
+    }
+
+    private fun publishSessionStartFailure(error: Throwable) {
+        val permissionDenied = error is SecurityException ||
+            error.message?.contains("permission", ignoreCase = true) == true
+        if (permissionDenied) {
+            publishCameraPermissionRequired()
+            return
+        }
+        ArMeasurementBridge.publish(
+            ArMeasurementState(
+                trackingLabel = "unavailable",
+                guidanceLabel = "ARCore session failed to start.",
+                statusLabel = error.message ?: "ARCore resume failed.",
+                statusLevel = ArStatusLevel.WARNING,
+                note = "Check Google Play Services for AR and camera permission.",
+            ),
+        )
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {

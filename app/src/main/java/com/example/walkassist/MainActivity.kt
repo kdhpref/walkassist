@@ -158,16 +158,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(overlay)
         setContentView(root)
 
-        if (savedInstanceState == null) {
-            val fragment = WalkAssistArFragment()
-            configureArFragment(fragment)
-            supportFragmentManager.commitNow {
-                replace(fragmentContainerId, fragment)
-            }
-        } else {
-            (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
-                ?.let(::configureArFragment)
-        }
+        attachArFragmentIfCameraPermitted()
     }
 
     private fun configureArFragment(fragment: WalkAssistArFragment) {
@@ -199,6 +190,38 @@ class MainActivity : AppCompatActivity() {
         }
         fragment.onLiveVlmStateChanged = { active ->
             liveVlmActive = active
+        }
+    }
+
+    private fun attachArFragmentIfCameraPermitted(retryExistingSession: Boolean = false) {
+        if (!hasCameraPermission()) {
+            arFragment = null
+            ArMeasurementBridge.publish(
+                ArMeasurementState(
+                    trackingLabel = "permission",
+                    guidanceLabel = "카메라 권한을 허용하면 전방 안내를 시작합니다.",
+                    statusLabel = "Camera permission required.",
+                    statusLevel = ArStatusLevel.WARNING,
+                    note = "Android requires CAMERA permission before ARCore session creation.",
+                ),
+            )
+            return
+        }
+
+        val existingFragment =
+            supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment
+        if (existingFragment != null) {
+            configureArFragment(existingFragment)
+            if (retryExistingSession) {
+                existingFragment.retrySessionAfterCameraPermissionGranted()
+            }
+            return
+        }
+
+        val fragment = WalkAssistArFragment()
+        configureArFragment(fragment)
+        supportFragmentManager.commitNow {
+            replace(fragmentContainerId, fragment)
         }
     }
 
@@ -402,7 +425,29 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != REQUEST_GEOSPATIAL_LOCATION_PERMISSION) return
+        if (requestCode == REQUEST_STARTUP_PERMISSIONS) {
+            val cameraWasRequested = permissions.contains(Manifest.permission.CAMERA)
+            val cameraGranted = permissions
+                .zip(grantResults.toTypedArray())
+                .any { (permission, result) ->
+                    permission == Manifest.permission.CAMERA &&
+                        result == PackageManager.PERMISSION_GRANTED
+                }
+            if (cameraGranted || hasCameraPermission()) {
+                attachArFragmentIfCameraPermitted(retryExistingSession = cameraWasRequested)
+            } else {
+                Toast.makeText(
+                    this,
+                    "카메라 권한이 필요합니다. 권한을 허용한 뒤 다시 실행해 주세요.",
+                    Toast.LENGTH_LONG,
+                ).show()
+                attachArFragmentIfCameraPermitted(retryExistingSession = cameraWasRequested)
+            }
+
+            if (!permissions.contains(Manifest.permission.ACCESS_FINE_LOCATION)) return
+        } else if (requestCode != REQUEST_GEOSPATIAL_LOCATION_PERMISSION) {
+            return
+        }
 
         val preciseGranted = permissions
             .zip(grantResults.toTypedArray())
