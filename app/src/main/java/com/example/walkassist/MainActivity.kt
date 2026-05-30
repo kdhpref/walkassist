@@ -99,9 +99,19 @@ class MainActivity : AppCompatActivity() {
 
         val missingStartupPermissions = buildList {
             if (!hasCameraPermission()) add(Manifest.permission.CAMERA)
+            if (WalkAssistSettings.debugPipelineFlags(this@MainActivity).geospatialEnabled &&
+                !hasPreciseLocationPermission()
+            ) {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+                add(Manifest.permission.ACCESS_COARSE_LOCATION)
+            }
         }
         if (missingStartupPermissions.isNotEmpty()) {
-            ActivityCompat.requestPermissions(this, missingStartupPermissions.toTypedArray(), 100)
+            ActivityCompat.requestPermissions(
+                this,
+                missingStartupPermissions.toTypedArray(),
+                REQUEST_STARTUP_PERMISSIONS,
+            )
         }
 
         val root = FrameLayout(this).apply {
@@ -138,6 +148,7 @@ class MainActivity : AppCompatActivity() {
                         vlmButtonText = liveVlmButtonText(),
                         onStopReplayRecording = ::stopArCoreReplayRecording,
                         onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
+                        onDebugFlagsPersisted = ::persistDebugPipelineFlags,
                     )
                 }
             }
@@ -348,6 +359,68 @@ class MainActivity : AppCompatActivity() {
             PackageManager.PERMISSION_GRANTED
     }
 
+    private fun hasPreciseLocationPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun persistDebugPipelineFlags(flags: DebugPipelineFlags) {
+        WalkAssistSettings.setDebugPipelineFlags(this, flags)
+        if (flags.geospatialEnabled) {
+            requestPreciseLocationForGeospatial()
+        }
+    }
+
+    private fun requestPreciseLocationForGeospatial() {
+        if (hasPreciseLocationPermission()) {
+            Toast.makeText(
+                this,
+                "정확한 위치 권한이 이미 허용되어 있습니다.",
+                Toast.LENGTH_SHORT,
+            ).show()
+            return
+        }
+
+        Toast.makeText(
+            this,
+            "Geospatial 사용을 위해 정확한 위치 권한을 요청합니다.",
+            Toast.LENGTH_SHORT,
+        ).show()
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+            ),
+            REQUEST_GEOSPATIAL_LOCATION_PERMISSION,
+        )
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_GEOSPATIAL_LOCATION_PERMISSION) return
+
+        val preciseGranted = permissions
+            .zip(grantResults.toTypedArray())
+            .any { (permission, result) ->
+                permission == Manifest.permission.ACCESS_FINE_LOCATION &&
+                    result == PackageManager.PERMISSION_GRANTED
+            }
+        Toast.makeText(
+            this,
+            if (preciseGranted) {
+                "정확한 위치 권한이 허용되었습니다. Geospatial을 다시 안정화합니다."
+            } else {
+                "Geospatial은 정확한 위치 권한이 필요합니다. 앱 설정에서 정확한 위치를 허용해 주세요."
+            },
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+
     private fun configureFullscreenCutout() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
@@ -363,6 +436,8 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "WalkAssistMain"
+        private const val REQUEST_STARTUP_PERMISSIONS = 100
+        private const val REQUEST_GEOSPATIAL_LOCATION_PERMISSION = 101
     }
 }
 
@@ -376,6 +451,7 @@ private fun WalkAssistRootOverlay(
     vlmButtonText: String,
     onStopReplayRecording: () -> Unit,
     onPlaneMeshDebugChanged: (Boolean) -> Unit,
+    onDebugFlagsPersisted: (DebugPipelineFlags) -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
     var replayState by remember { mutableStateOf(ArCoreReplayController.currentState()) }
@@ -385,7 +461,7 @@ private fun WalkAssistRootOverlay(
     var resourceUsage by remember { mutableStateOf(ResourceUsageSnapshot()) }
     val updateDebugFlags: (DebugPipelineFlags) -> Unit = { nextFlags ->
         debugFlags = nextFlags
-        WalkAssistSettings.setDebugPipelineFlags(context, nextFlags)
+        onDebugFlagsPersisted(nextFlags)
     }
     LaunchedEffect(resourceMonitor) {
         while (true) {
@@ -601,6 +677,26 @@ private fun GuideStatusOverlay(
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Medium,
             )
+            if (arState.routeRealityGuidanceLabel.isNotBlank()) {
+                Spacer(modifier = Modifier.height(18.dp))
+                Text(
+                    text = arState.routeRealityGuidanceLabel,
+                    color = palette.foreground,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                )
+                if (arState.routeRealityGuidanceDetail.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = arState.routeRealityGuidanceDetail,
+                        color = palette.foreground.copy(alpha = 0.82f),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
         }
 
         Text(
@@ -800,6 +896,22 @@ private fun MeasurementOverlay(
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Medium,
             )
+            if (state.routeRealityGuidanceLabel.isNotBlank()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = state.routeRealityGuidanceLabel,
+                    color = Color(0xFFB6E7FF),
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                if (state.routeRealityGuidanceDetail.isNotBlank()) {
+                    Text(
+                        text = state.routeRealityGuidanceDetail,
+                        color = Color(0xFFD8E3EE),
+                        fontSize = 11.sp,
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(12.dp))
             ConfidenceBar(
                 score = state.sensingConfidenceScore,
@@ -841,6 +953,8 @@ private fun MeasurementOverlay(
             if (debugFlags.rawDepthEnabled) {
                 DepthGridOverlay(
                     cells = state.depthGridCells,
+                    geospatialEnabled = debugFlags.geospatialEnabled,
+                    geospatialStatusLabel = state.geospatialStatusLabel,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -939,12 +1053,29 @@ private fun ObjectDetectionOverlay(
 @Composable
 private fun DepthGridOverlay(
     cells: List<DepthGridCell>,
+    geospatialEnabled: Boolean = false,
+    geospatialStatusLabel: String = "off",
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier = modifier) {
         val cellWidth = maxWidth / 4
         val cellHeight = maxHeight / 4
         val cellsByPosition = cells.associateBy { it.column to it.row }
+        val longRangeCount = cells.count { it.isLongRange && it.distanceMeters != null }
+
+        if (geospatialEnabled) {
+            Text(
+                text = "Geospatial depth $geospatialStatusLabel / long-range $longRangeCount",
+                color = if (geospatialStatusLabel == "enabled") Color(0xFFB6E7FF) else Color(0xFFFFDB7A),
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 110.dp)
+                    .background(Color(0xAA121820), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
+            )
+        }
 
         for (row in 0 until 4) {
             for (column in 0 until 4) {
@@ -959,13 +1090,13 @@ private fun DepthGridOverlay(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = distance?.let(::formatMetersShort) ?: "--",
+                        text = depthGridLabel(cell),
                         color = Color.White,
-                        fontSize = 18.sp,
+                        fontSize = if (cell?.isLongRange == true) 14.sp else 18.sp,
                         fontWeight = FontWeight.Bold,
                         textAlign = TextAlign.Center,
                         modifier = Modifier
-                            .background(depthGridColor(distance), RoundedCornerShape(10.dp))
+                            .background(depthGridColor(cell), RoundedCornerShape(10.dp))
                             .padding(horizontal = 10.dp, vertical = 6.dp),
                     )
                 }
@@ -1091,6 +1222,13 @@ private fun DebugOverlay(
             onClick = { onDebugFlagsChanged(debugFlags.copy(rawDepthEnabled = !debugFlags.rawDepthEnabled)) },
         )
         DebugToggleRow(
+            label = "Geospatial",
+            enabled = debugFlags.geospatialEnabled,
+            onClick = {
+                onDebugFlagsChanged(debugFlags.copy(geospatialEnabled = !debugFlags.geospatialEnabled))
+            },
+        )
+        DebugToggleRow(
             label = "보행구역 거리측정",
             enabled = debugFlags.walkingZoneDistanceEnabled,
             onClick = {
@@ -1117,6 +1255,17 @@ private fun DebugOverlay(
         Text("Tracking: ${state.trackingLabel}", color = Color(0xFFD9E2EA))
         if (state.trackingFailureLabel.isNotBlank()) {
             Text("Tracking issue: ${state.trackingFailureLabel}", color = Color(0xFFFFE08B))
+        }
+        Text(
+            "Geo: ${state.geospatialStatusLabel} ${state.geospatialEarthStateLabel}".trim(),
+            color = if (state.geospatialStatusLabel == "enabled") Color(0xFFB6E7FF) else Color(0xFFD9E2EA),
+        )
+        if (debugFlags.geospatialEnabled) {
+            Text("Streetscape: ${state.geospatialStreetscapeGeometryCount}", color = Color(0xFFD9E2EA))
+        }
+        if (state.routeRealityGuidanceLabel.isNotBlank()) {
+            Text("Route: ${state.routeRealityGuidanceAction}/${state.routeRealityGuidanceSource}", color = Color(0xFFB6E7FF))
+            Text(state.routeRealityGuidanceDetail, color = Color(0xFFD9E2EA))
         }
         Text("Pitch ${state.pitchDownDegrees.toInt()}deg", color = Color(0xFFD9E2EA))
         Text(
@@ -1267,8 +1416,18 @@ private fun presentableRisk(riskLabel: String): Pair<String, Color> {
     }
 }
 
-private fun depthGridColor(distanceMeters: Float?): Color {
-    val distance = distanceMeters ?: return Color(0xFFFFB648)
+private fun depthGridLabel(cell: DepthGridCell?): String {
+    val distance = cell?.distanceMeters ?: return "--"
+    return if (cell.isLongRange) {
+        "GEO?\n${formatMetersShort(distance)}"
+    } else {
+        formatMetersShort(distance)
+    }
+}
+
+private fun depthGridColor(cell: DepthGridCell?): Color {
+    val distance = cell?.distanceMeters ?: return Color(0xFFFFB648)
+    if (cell.isLongRange) return Color(0xDD0E7490)
     return when {
         distance < 0.8f -> Color(0xDDE85D75)
         distance < 1.5f -> Color(0xDDDDAA45)

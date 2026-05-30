@@ -8,7 +8,12 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.PointF
 import android.graphics.Rect
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.Geocoder
+import android.location.Location
 import android.os.Bundle
 import android.util.Log
 import android.view.View
@@ -40,11 +45,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.atan2
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.sqrt
 
-class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
+class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEventListener {
     private data class GuidePoint(
         val location: LatLng,
         val description: String,
@@ -55,7 +62,11 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
     private lateinit var repository: TMapRepository
     private lateinit var voiceAnnouncer: RouteVoiceAnnouncer
     private lateinit var stepAdapter: ArrayAdapter<String>
+    private lateinit var sensorManager: SensorManager
+    private var rotationVectorSensor: Sensor? = null
+    private var cameraGuidanceView: TextView? = null
     private val stepList = mutableListOf<String>()
+    private val routeGuidanceEngine = RouteCameraGuidanceEngine()
     private var naverMap: NaverMap? = null
     private val destinationMarker = Marker()
     private var pathOverlay = PathOverlay()
@@ -63,7 +74,12 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
     private val guidePoints = mutableListOf<GuidePoint>()
     private val guideMarkers = mutableListOf<Marker>()
     private val fullRouteCoords = mutableListOf<LatLng>()
+    private var cameraHeadingDegrees: Double? = null
+    private var lastRouteLocation: LatLng? = null
+    private var lastGpsBearingDegrees: Double? = null
+    private var lastRealityAction: RouteCameraAction? = null
     private var lastDeviationAnnouncedTime = 0L
+    private var lastRealityGuidanceSpokenTime = 0L
 
     private val locationPermissionRequest = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -82,6 +98,8 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
         repository = TMapRepository(apiKey = BuildConfig.TMAP_API_KEY)
         voiceAnnouncer = RouteVoiceAnnouncer(this)
         locationSource = FusedLocationSource(this, LOCATION_PERMISSION_REQUEST_CODE)
+        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
+        rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
         stepAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, stepList)
         findViewById<ListView>(R.id.lv_steps).adapter = stepAdapter
         findViewById<ListView>(R.id.lv_steps).setOnItemClickListener { _, _, position, _ ->
@@ -127,6 +145,7 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
         val clearButton = findViewById<Button>(R.id.btn_clear)
         val routePanel = findViewById<View>(R.id.path_list_panel)
         val summaryView = findViewById<TextView>(R.id.tv_summary)
+        cameraGuidanceView = findViewById(R.id.tv_camera_guidance)
 
         destinationInput.setOnFocusChangeListener { _, hasFocus ->
             if (hasFocus) showKeyboard(destinationInput)
@@ -151,6 +170,7 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
             clearRoute()
             routePanel.visibility = View.GONE
             summaryView.visibility = View.GONE
+            cameraGuidanceView?.visibility = View.GONE
             clearButton.visibility = View.GONE
             hideKeyboard(destinationInput)
             destinationMarker.position = latLng
@@ -159,7 +179,10 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
         }
 
         map.addOnLocationChangeListener { location ->
-            handleRouteProgress(LatLng(location.latitude, location.longitude))
+            handleRouteProgress(
+                currentLatLng = LatLng(location.latitude, location.longitude),
+                location = location,
+            )
         }
     }
 
@@ -260,11 +283,25 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
                 guideMarkers.add(this)
             }
         }
+        SharedRouteNavigation.publishRoute(
+            destinationName = destinationName,
+            route = coords,
+            guidePoints = guidePoints.map {
+                SharedRouteGuidePoint(
+                    location = it.location,
+                    description = it.description,
+                )
+            },
+        )
         stepAdapter.notifyDataSetChanged()
 
         val timeMin = route.totalTimeSeconds / 60
         summaryView.text = "총 ${route.totalDistanceMeters}m | 약 ${timeMin}분"
         summaryView.visibility = View.VISIBLE
+        cameraGuidanceView?.apply {
+            text = "현실 방향 안내를 준비 중입니다."
+            visibility = View.VISIBLE
+        }
         routePanel.visibility = View.VISIBLE
         clearButton.visibility = View.VISIBLE
         map.moveCamera(CameraUpdate.fitBounds(LatLngBounds.from(coords), ROUTE_BOUNDS_PADDING))
@@ -277,8 +314,16 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    private fun handleRouteProgress(currentLatLng: LatLng) {
+    private fun handleRouteProgress(
+        currentLatLng: LatLng,
+        location: Location? = null,
+    ) {
         if (!isRouteActive) return
+        lastRouteLocation = currentLatLng
+        lastGpsBearingDegrees = location
+            ?.takeIf { it.hasBearing() }
+            ?.bearing
+            ?.toDouble()
 
         if (fullRouteCoords.size > 1) {
             val distanceToLine = getShortestDistanceToPath(currentLatLng, fullRouteCoords)
@@ -292,6 +337,8 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
             }
         }
 
+        updateRealityGuidance(currentLatLng)
+
         for (point in guidePoints) {
             if (!point.isAnnounced && currentLatLng.distanceTo(point.location) <= GUIDE_ANNOUNCE_METERS) {
                 voiceAnnouncer.speak(point.description)
@@ -299,6 +346,49 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
                 break
             }
         }
+    }
+
+    private fun updateRealityGuidance(currentLatLng: LatLng) {
+        val guidance = routeGuidanceEngine.compute(
+            route = fullRouteCoords,
+            currentLocation = currentLatLng,
+            cameraHeadingDegrees = cameraHeadingDegrees ?: lastGpsBearingDegrees,
+            nextGuidePoint = guidePoints.firstOrNull { !it.isAnnounced }?.location ?: fullRouteCoords.lastOrNull(),
+        )
+        cameraGuidanceView?.apply {
+            text = buildRealityGuidanceText(guidance)
+            visibility = View.VISIBLE
+        }
+        maybeSpeakRealityGuidance(guidance)
+    }
+
+    private fun buildRealityGuidanceText(guidance: RouteCameraGuidance): String {
+        val heading = cameraHeadingDegrees ?: lastGpsBearingDegrees
+        val headingLabel = heading?.let { "${it.toInt()}deg" } ?: "--"
+        val routeBearingLabel = guidance.routeBearingDegrees?.let { "${it.toInt()}deg" } ?: "--"
+        val pathDistance = guidance.distanceToPathMeters.toInt().coerceAtLeast(0)
+        return buildString {
+            append("현실 방향 안내: ")
+            append(guidance.message)
+            append("\n카메라 ")
+            append(headingLabel)
+            append(" / 경로 ")
+            append(routeBearingLabel)
+            append(" / 경로 이탈 ")
+            append(pathDistance)
+            append("m")
+        }
+    }
+
+    private fun maybeSpeakRealityGuidance(guidance: RouteCameraGuidance) {
+        val now = System.currentTimeMillis()
+        val actionChanged = guidance.action != lastRealityAction
+        if (!actionChanged && now - lastRealityGuidanceSpokenTime < REALITY_GUIDANCE_COOLDOWN_MS) return
+        if (now - lastRealityGuidanceSpokenTime < REALITY_GUIDANCE_MIN_INTERVAL_MS) return
+
+        lastRealityAction = guidance.action
+        lastRealityGuidanceSpokenTime = now
+        voiceAnnouncer.speak(guidance.message)
     }
 
     private fun getShortestDistanceToPath(point: LatLng, path: List<LatLng>): Double {
@@ -389,10 +479,16 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
         guideMarkers.clear()
         guidePoints.clear()
         fullRouteCoords.clear()
+        SharedRouteNavigation.clear()
         stepList.clear()
         stepAdapter.notifyDataSetChanged()
         isRouteActive = false
         lastDeviationAnnouncedTime = 0L
+        lastRealityGuidanceSpokenTime = 0L
+        lastRealityAction = null
+        lastRouteLocation = null
+        lastGpsBearingDegrees = null
+        cameraGuidanceView?.visibility = View.GONE
     }
 
     private fun showKeyboard(input: EditText) {
@@ -420,6 +516,45 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
+    override fun onResume() {
+        super.onResume()
+        rotationVectorSensor?.let { sensor ->
+            sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_UI)
+        }
+    }
+
+    override fun onPause() {
+        sensorManager.unregisterListener(this)
+        super.onPause()
+    }
+
+    override fun onSensorChanged(event: SensorEvent) {
+        if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
+        val rotationMatrix = FloatArray(9)
+        SensorManager.getRotationMatrixFromVector(rotationMatrix, event.values)
+        cameraHeadingDegrees = rearCameraHeadingDegrees(rotationMatrix)
+        if (isRouteActive) {
+            lastRouteLocation?.let(::updateRealityGuidance)
+        }
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+
+    private fun rearCameraHeadingDegrees(rotationMatrix: FloatArray): Double? {
+        if (rotationMatrix.size < 9) return null
+        val east = -rotationMatrix[2].toDouble()
+        val north = -rotationMatrix[5].toDouble()
+        val horizontalMagnitude = sqrt((east * east) + (north * north))
+        if (horizontalMagnitude < 0.12) return null
+        return normalizeHeadingDegrees(Math.toDegrees(atan2(east, north)))
+    }
+
+    private fun normalizeHeadingDegrees(value: Double): Double {
+        var normalized = value % 360.0
+        if (normalized < 0.0) normalized += 360.0
+        return normalized
+    }
+
     override fun onDestroy() {
         voiceAnnouncer.shutdown()
         super.onDestroy()
@@ -439,5 +574,7 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback {
         private const val ROUTE_DEVIATION_METERS = 40.0
         private const val ROUTE_DEVIATION_COOLDOWN_MS = 10_000L
         private const val GUIDE_ANNOUNCE_METERS = 20.0
+        private const val REALITY_GUIDANCE_COOLDOWN_MS = 7_000L
+        private const val REALITY_GUIDANCE_MIN_INTERVAL_MS = 2_500L
     }
 }

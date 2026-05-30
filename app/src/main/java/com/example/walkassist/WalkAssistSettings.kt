@@ -8,6 +8,7 @@ object WalkAssistSettings {
     private const val KEY_DEBUG_YOLO_ENABLED = "debug_yolo_enabled"
     private const val KEY_DEBUG_ARCORE_HIT_TEST_ENABLED = "debug_arcore_hit_test_enabled"
     private const val KEY_DEBUG_RAW_DEPTH_ENABLED = "debug_raw_depth_enabled"
+    private const val KEY_DEBUG_GEOSPATIAL_ENABLED = "debug_geospatial_enabled"
     private const val KEY_DEBUG_WALKING_ZONE_DISTANCE_ENABLED = "debug_walking_zone_distance_enabled"
     private const val KEY_DEBUG_LOCAL_MAP_ENABLED = "debug_local_map_enabled"
     private const val KEY_DEBUG_VLM_ENABLED = "debug_vlm_enabled"
@@ -50,6 +51,7 @@ object WalkAssistSettings {
             yoloEnabled = prefs.getBoolean(KEY_DEBUG_YOLO_ENABLED, true),
             arCoreHitTestEnabled = prefs.getBoolean(KEY_DEBUG_ARCORE_HIT_TEST_ENABLED, true),
             rawDepthEnabled = prefs.getBoolean(KEY_DEBUG_RAW_DEPTH_ENABLED, true),
+            geospatialEnabled = prefs.getBoolean(KEY_DEBUG_GEOSPATIAL_ENABLED, false),
             walkingZoneDistanceEnabled = prefs.getBoolean(KEY_DEBUG_WALKING_ZONE_DISTANCE_ENABLED, false),
             localMapEnabled = prefs.getBoolean(KEY_DEBUG_LOCAL_MAP_ENABLED, true),
             vlmEnabled = prefs.getBoolean(KEY_DEBUG_VLM_ENABLED, true),
@@ -65,6 +67,7 @@ object WalkAssistSettings {
             .putBoolean(KEY_DEBUG_YOLO_ENABLED, flags.yoloEnabled)
             .putBoolean(KEY_DEBUG_ARCORE_HIT_TEST_ENABLED, flags.arCoreHitTestEnabled)
             .putBoolean(KEY_DEBUG_RAW_DEPTH_ENABLED, flags.rawDepthEnabled)
+            .putBoolean(KEY_DEBUG_GEOSPATIAL_ENABLED, flags.geospatialEnabled)
             .putBoolean(KEY_DEBUG_WALKING_ZONE_DISTANCE_ENABLED, flags.walkingZoneDistanceEnabled)
             .putBoolean(KEY_DEBUG_LOCAL_MAP_ENABLED, flags.localMapEnabled)
             .putBoolean(KEY_DEBUG_VLM_ENABLED, flags.vlmEnabled)
@@ -76,6 +79,7 @@ data class DebugPipelineFlags(
     val yoloEnabled: Boolean = true,
     val arCoreHitTestEnabled: Boolean = true,
     val rawDepthEnabled: Boolean = true,
+    val geospatialEnabled: Boolean = false,
     val walkingZoneDistanceEnabled: Boolean = false,
     val localMapEnabled: Boolean = true,
     val vlmEnabled: Boolean = true,

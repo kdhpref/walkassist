@@ -380,7 +380,7 @@ class Florence2OnnxGenerator(
     companion object {
         private const val TAG = "Florence2OnnxGenerator"
         private const val CAPTION_PROMPT =
-            "이미지에 보이는 보행 장면을 한국어 두 문장으로 묘사하세요. 사람, 차량, 문, 계단, 턱, 표지판, 통로 상태를 구체적으로 말하세요."
+            "이미지에 보이는 보행 장면을 한국어 두 문장으로 묘사하세요. 사람, 차량, 문, 턱, 표지판, 통로 상태를 구체적으로 말하세요."
         private const val HIDDEN_SIZE = 768
         private const val VOCAB_SIZE = 51289
         private const val MAX_NEW_TOKENS = 64

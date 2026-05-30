@@ -68,6 +68,20 @@
             android:textSize="14sp"
             android:textStyle="bold"
             android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/tv_camera_guidance"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#EAF4FF"
+            android:paddingStart="12dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="8dp"
+            android:textColor="#111827"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:visibility="gone" />
     </LinearLayout>
 
     <LinearLayout

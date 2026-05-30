@@ -134,7 +134,6 @@ object VlmWalkingAnnouncementFormatter {
             lower.startsWith("qwen2-vlm:") -> cue
             lower.startsWith("vlm:") -> cue
             lower == "door" -> "문"
-            lower == "stairs" || lower == "stair" -> "계단"
             lower == "curb" -> "턱"
             lower == "traffic cone" || lower == "cone" -> "안전 콘"
             lower == "construction sign" -> "공사 표지판"
@@ -167,7 +166,6 @@ object VlmWalkingAnnouncementFormatter {
             "stop sign" -> "표지판"
             "crosswalk" -> "횡단보도"
             "door" -> "문"
-            "stairs", "stair" -> "계단"
             "curb" -> "턱"
             "traffic cone", "cone" -> "안전 콘"
             else -> label

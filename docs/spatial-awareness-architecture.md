@@ -92,7 +92,7 @@ The VLM should run in two modes:
 Recommended cadence:
 
 - Normal walking: every 4-6 seconds.
-- Low confidence, approaching object, crosswalk, stairs, curb, or blocked center lane: every 1.5-3 seconds.
+- Low confidence, approaching object, crosswalk, curb, or blocked center lane: every 1.5-3 seconds.
 - Cooldown after TTS: avoid repeating equivalent messages until evidence changes.
 
 ## VLM Input Principle

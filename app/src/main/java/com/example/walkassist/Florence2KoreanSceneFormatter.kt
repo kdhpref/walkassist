@@ -89,7 +89,6 @@ object Florence2KoreanSceneFormatter {
             "stop sign" -> "정지 표지판"
             "crosswalk" -> "횡단보도"
             "door" -> "문"
-            "stairs", "stair" -> "계단"
             "curb" -> "턱"
             "traffic cone", "cone" -> "안전 콘"
             else -> null
@@ -141,7 +140,6 @@ object Florence2KoreanSceneFormatter {
         CaptionKeyword(Regex("\\b(bicycle|bike|cyclist)\\b", RegexOption.IGNORE_CASE), "자전거"),
         CaptionKeyword(Regex("\\b(motorcycle|scooter)\\b", RegexOption.IGNORE_CASE), "오토바이"),
         CaptionKeyword(Regex("\\b(crosswalk|zebra crossing|pedestrian crossing)\\b", RegexOption.IGNORE_CASE), "횡단보도"),
-        CaptionKeyword(Regex("\\b(stair|stairs|steps|staircase)\\b", RegexOption.IGNORE_CASE), "계단"),
         CaptionKeyword(Regex("\\b(door|entrance|gate)\\b", RegexOption.IGNORE_CASE), "문"),
         CaptionKeyword(Regex("\\b(sign|signage|traffic sign)\\b", RegexOption.IGNORE_CASE), "표지판"),
         CaptionKeyword(Regex("\\b(traffic light|signal light)\\b", RegexOption.IGNORE_CASE), "신호등"),
@@ -153,5 +151,5 @@ object Florence2KoreanSceneFormatter {
         CaptionKeyword(Regex("\\b(curb|kerb)\\b", RegexOption.IGNORE_CASE), "턱"),
     )
     private val OUTDOOR_REGEX = Regex("\\b(street|road|sidewalk|crosswalk|vehicle|traffic|building)\\b", RegexOption.IGNORE_CASE)
-    private val INDOOR_REGEX = Regex("\\b(room|hallway|corridor|indoor|floor|door|wall|stairs)\\b", RegexOption.IGNORE_CASE)
+    private val INDOOR_REGEX = Regex("\\b(room|hallway|corridor|indoor|floor|door|wall)\\b", RegexOption.IGNORE_CASE)
 }

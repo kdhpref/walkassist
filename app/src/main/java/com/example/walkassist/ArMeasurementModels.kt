@@ -49,6 +49,7 @@ data class DepthGridCell(
     val row: Int,
     val distanceMeters: Float?,
     val confidence: Float = 0f,
+    val isLongRange: Boolean = false,
 )
 
 data class WalkingZoneDepthSample(
@@ -65,6 +66,13 @@ data class ArMeasurementState(
     val horizontalPlaneCount: Int = 0,
     val verticalPlaneCount: Int = 0,
     val sensingConfidenceScore: Int = 0,
+    val geospatialStatusLabel: String = "off",
+    val geospatialEarthStateLabel: String = "",
+    val geospatialStreetscapeGeometryCount: Int = 0,
+    val routeRealityGuidanceLabel: String = "",
+    val routeRealityGuidanceDetail: String = "",
+    val routeRealityGuidanceAction: String = "",
+    val routeRealityGuidanceSource: String = "",
     val pitchDownDegrees: Float = 0f,
     val leftLaneWidthRatio: Float = 0.24f,
     val centerLaneWidthRatio: Float = 0.28f,
@@ -90,6 +98,8 @@ data class ArMeasurementState(
     val crosswalkStripeCount: Int = 0,
     val crosswalkYoloConfidence: Float = 0f,
     val crosswalkModeLabel: String = "",
+    val crosswalkMapDistanceMeters: Float? = null,
+    val crosswalkMapHeadingDeltaDegrees: Float? = null,
     val objectDetections: List<ObjectOverlayDetection> = emptyList(),
     val depthGridCells: List<DepthGridCell> = emptyList(),
     val walkingZoneDepthSamples: List<WalkingZoneDepthSample> = emptyList(),

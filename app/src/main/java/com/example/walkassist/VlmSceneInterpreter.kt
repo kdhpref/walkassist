@@ -71,7 +71,7 @@ interface VlmSceneInterpreter {
 object VlmScenePromptSchema {
     const val SYSTEM_PROMPT = """
 You are the camera-based visual guide for a blind or low-vision pedestrian.
-Describe the scene as the user's eyes: visible objects, doors, stairs, curbs, people, vehicles, signs, narrow passages, floor/path condition, and left/center/right position when visible.
+Describe the scene as the user's eyes: visible objects, doors, curbs, people, vehicles, signs, narrow passages, floor/path condition, and left/center/right position when visible.
 Never tell the user to look, check, verify, inspect, or confirm the surroundings themselves. Forbidden wording includes "직접 확인", "주변을 확인", "전방을 확인", "확인하세요", "살펴보세요", "look around", and "check yourself".
 Use YOLO, ARCore, depth, floor, and distance values only as private supporting context for deciding what matters.
 Do not read raw detector labels, confidence scores, meter values, or sensor field names to the user unless a distance is essential for immediate safety.
@@ -229,7 +229,6 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
             "stop sign" -> "표지판"
             "crosswalk" -> "횡단보도"
             "door" -> "문"
-            "stairs", "stair" -> "계단"
             "curb" -> "턱"
             "traffic cone", "cone" -> "안전콘"
             else -> label
@@ -237,51 +236,3 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
     }
 }
 
-class VlmInvocationPolicy(
-    private val minIntervalMillis: Long = 1_500L,
-    private val periodicIntervalMillis: Long = 5_000L,
-) {
-    private var lastInvocationMillis: Long? = null
-
-    fun shouldInvoke(
-        frame: SpatialFrame,
-        primaryAnalysis: FrameAnalysis,
-    ): Boolean {
-        val metrics = primaryAnalysis.pathMetrics
-        val collisionDistance = metrics?.collisionDistanceMeters ?: metrics?.centerObstacleMeters
-        val lowConfidence = (primaryAnalysis.floorSegmentation?.confidence ?: 0f) < 0.55f
-        val cautionDistance = collisionDistance == null || collisionDistance < 1.8f
-        val usefulObjectCue = primaryAnalysis.detections.any {
-            it.label.equals("person", ignoreCase = true) || it.label.equals("crosswalk", ignoreCase = true)
-        }
-        return shouldInvoke(
-            timestampMillis = frame.timestampMillis,
-            hasPriorityCue = lowConfidence || cautionDistance || usefulObjectCue,
-        )
-    }
-
-    internal fun shouldInvoke(
-        timestampMillis: Long,
-        hasPriorityCue: Boolean,
-    ): Boolean {
-        val previousInvocationMillis = lastInvocationMillis
-        if (
-            previousInvocationMillis != null &&
-            timestampMillis >= previousInvocationMillis &&
-            timestampMillis - previousInvocationMillis < minIntervalMillis
-        ) {
-            return false
-        }
-        val elapsedMillis = previousInvocationMillis?.let { timestampMillis - it }
-        val shouldRun = previousInvocationMillis == null ||
-            hasPriorityCue ||
-            elapsedMillis == null ||
-            elapsedMillis >= periodicIntervalMillis
-        return if (shouldRun) {
-            lastInvocationMillis = timestampMillis
-            true
-        } else {
-            false
-        }
-    }
-}

@@ -1,11 +1,6 @@
 ﻿package com.example.walkassist
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
-import android.graphics.Matrix
-import android.graphics.Rect
-import android.graphics.YuvImage
 import android.media.Image
 import android.net.Uri
 import android.os.Bundle
@@ -18,18 +13,23 @@ import android.view.Surface
 import android.view.View
 import android.view.ViewGroup
 import androidx.fragment.app.Fragment
+import com.example.walkassist.map.RouteCameraGuidance
+import com.example.walkassist.map.RouteCameraGuidanceEngine
+import com.example.walkassist.map.SharedRouteNavigation
 import com.example.walkassist.ocr.OneShotOcrReader
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.Config
 import com.google.ar.core.Coordinates2d
 import com.google.ar.core.DepthPoint
 import com.google.ar.core.Frame
+import com.google.ar.core.GeospatialPose
 import com.google.ar.core.Plane
 import com.google.ar.core.PlaybackStatus
 import com.google.ar.core.Point
 import com.google.ar.core.RecordingConfig
 import com.google.ar.core.RecordingStatus
 import com.google.ar.core.Session
+import com.google.ar.core.StreetscapeGeometry
 import com.google.ar.core.Track
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
@@ -37,7 +37,6 @@ import com.google.ar.core.exceptions.NotYetAvailableException
 import com.google.ar.core.exceptions.RecordingFailedException
 import com.google.ar.core.exceptions.UnavailableException
 import java.io.Closeable
-import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
@@ -47,8 +46,13 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
+import com.naver.maps.geometry.LatLng
 import kotlin.math.abs
 import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
@@ -82,6 +86,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val leftFreeSpaceMeters: Float?,
         val centerFreeSpaceMeters: Float?,
         val rightFreeSpaceMeters: Float?,
+    )
+
+    private data class CrosswalkFrameSnapshot(
+        val pattern: CrosswalkPatternResult,
+        val timestampNanos: Long,
     )
 
     private data class CorridorHit(
@@ -142,6 +151,12 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val timestampNanos: Long,
     )
 
+    private data class GeospatialRuntimeStatus(
+        val statusLabel: String,
+        val earthStateLabel: String = "",
+        val streetscapeGeometryCount: Int = 0,
+    )
+
     private enum class HitSource {
         FLOOR,
         WALL,
@@ -163,13 +178,18 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var lastCameraX: Float? = null
     private var lastCameraY: Float? = null
     private var lastCameraZ: Float? = null
+    private var configuredGeospatialRequested: Boolean? = null
+    private var geospatialConfiguredActive = false
+    private var geospatialConfigureStatusLabel = "off"
+    private var lastGeospatialConfigureAttemptAtMs = 0L
 
     private val objectAnalyzerDelegate = lazy { ObjectAnalyzer(requireContext().applicationContext) }
     private val objectAnalyzer by objectAnalyzerDelegate
     private val vlmSceneInterpreter by lazy { WalkAssistVlmFactory.create(requireContext().applicationContext) }
-    private val vlmInvocationPolicy = VlmInvocationPolicy()
+    private val routeGuidanceEngine = RouteCameraGuidanceEngine()
     private var oneShotOcrReader: OneShotOcrReader? = null
     private val objectTracker = ObjectTracker()
+    private val crosswalkPatternDetector = CrosswalkPatternDetector()
     private val detectorExecutor = Executors.newSingleThreadExecutor()
     private val vlmExecutor = Executors.newSingleThreadExecutor()
     private val detectionInFlight = AtomicBoolean(false)
@@ -181,6 +201,13 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
     @Volatile
     private var lastVlmVisionState: VlmVisionState? = null
+    @Volatile
+    private var lastCrosswalkFrameSnapshot = CrosswalkFrameSnapshot(
+        pattern = EMPTY_CROSSWALK_RESULT,
+        timestampNanos = 0L,
+    )
+    private var smoothedCrosswalkScore = 0f
+    private val crosswalkDetectionHistory = ArrayDeque<Boolean>()
     private val objectMotionMemory = mutableMapOf<Int, ObjectMotionMemory>()
     private val worldLocalMap = WorldLocalMap(
         halfRangeMeters = 5f,
@@ -206,6 +233,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var cameraTextureId = 0
     private var viewportWidth = 1
     private var viewportHeight = 1
+    private var frameArgbPixels = IntArray(0)
     @Volatile
     private var oneShotVlmRequestedAtMs: Long = 0L
     private val liveVlmSessionActive = AtomicBoolean(false)
@@ -213,7 +241,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
     fun requestOneShotOcr() {
         if (oneShotOcrRequested.get() || oneShotOcrInFlight.get()) {
-            dispatchOneShotOcrResult("?대? 臾몄옄 ?몄떇 以묒엯?덈떎.")
+            dispatchOneShotOcrResult("이미 문자 인식 중입니다.")
             return
         }
         oneShotOcrRequested.set(true)
@@ -228,7 +256,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             return
         }
         if (oneShotVlmRequested.get() || oneShotVlmInFlight.get()) {
-            dispatchOneShotVlmResult("?대? ?욎そ ?λ㈃??遺꾩꽍 以묒엯?덈떎. ?좎떆留?湲곕떎??二쇱꽭??")
+            dispatchOneShotVlmResult("이미 전방 화면을 분석 중입니다. 잠시만 기다려 주세요.")
             return
         }
         oneShotVlmRequestedAtMs = SystemClock.elapsedRealtime()
@@ -239,15 +267,15 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         if (WalkAssistSettings.vlmModelOption(requireContext().applicationContext) !=
             VlmModelOption.GEMINI_2_5_FLASH_LIVE_API
         ) {
-            dispatchOneShotVlmResult("Gemini 2.5 Live 紐⑤뜽???좏깮?????ъ슜?????덉뒿?덈떎.")
+            dispatchOneShotVlmResult("Gemini 2.5 Live 모델을 선택해야 사용할 수 있습니다.")
             return
         }
         if (!liveVlmSessionActive.get()) {
-            dispatchOneShotVlmResult("癒쇱? VLM ?쒖옉???뚮윭 Live ?곸긽 ?ㅽ듃由쇱쓣 耳?二쇱꽭??")
+            dispatchOneShotVlmResult("먼저 VLM 시작을 눌러 Live 영상 스트림을 켜 주세요.")
             return
         }
         if (!vlmSceneInterpreter.requestLiveGuidance()) {
-            dispatchOneShotVlmResult("Live ?곸긽???섏떊?섎뒗 以묒엯?덈떎. ?좎떆 ???ㅼ떆 ?뚮윭 二쇱꽭??")
+            dispatchOneShotVlmResult("Live 영상 응답을 기다리는 중입니다. 잠시 후 다시 눌러 주세요.")
         }
     }
 
@@ -256,7 +284,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             vlmSceneInterpreter.stopLiveSession()
             liveVlmSessionActive.set(false)
             onLiveVlmStateChanged?.invoke(false)
-            dispatchOneShotVlmResult("Gemini 2.5 Live ?몄뀡??醫낅즺?덉뒿?덈떎.")
+            dispatchOneShotVlmResult("Gemini 2.5 Live 세션을 종료했습니다.")
             return
         }
 
@@ -269,7 +297,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             onError = { message ->
                 liveVlmSessionActive.set(false)
                 onLiveVlmStateChanged?.invoke(false)
-                dispatchOneShotVlmResult("Gemini 2.5 Live ?몄뀡 ?ㅻ쪟. $message")
+                dispatchOneShotVlmResult("Gemini 2.5 Live 세션 오류. $message")
             },
             onTiming = { event ->
                 val appContext = requireContext().applicationContext
@@ -294,9 +322,9 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             liveVlmSessionActive.set(true)
             lastLiveVlmFrameSentAtMs = 0L
             onLiveVlmStateChanged?.invoke(true)
-            dispatchOneShotVlmResult("Gemini 2.5 Live ?몄뀡???쒖옉?⑸땲??")
+            dispatchOneShotVlmResult("Gemini 2.5 Live 세션을 시작합니다.")
         } else {
-            dispatchOneShotVlmResult("Gemini 2.5 Live ?몄뀡???ъ슜?????놁뒿?덈떎.")
+            dispatchOneShotVlmResult("Gemini 2.5 Live 세션을 사용할 수 없습니다.")
         }
     }
 
@@ -309,7 +337,10 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         planeMeshDebugVisible = visible
     }
 
-    private fun createSessionConfig(session: Session): Config {
+    private fun createSessionConfig(
+        session: Session,
+        geospatialEnabled: Boolean = false,
+    ): Config {
         return Config(session).apply {
             planeFindingMode = Config.PlaneFindingMode.HORIZONTAL_AND_VERTICAL
             updateMode = Config.UpdateMode.LATEST_CAMERA_IMAGE
@@ -319,6 +350,64 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             if (session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)) {
                 depthMode = Config.DepthMode.AUTOMATIC
             }
+            if (
+                geospatialEnabled &&
+                session.isGeospatialModeSupported(Config.GeospatialMode.ENABLED)
+            ) {
+                geospatialMode = Config.GeospatialMode.ENABLED
+                streetscapeGeometryMode = Config.StreetscapeGeometryMode.ENABLED
+            } else {
+                geospatialMode = Config.GeospatialMode.DISABLED
+                streetscapeGeometryMode = Config.StreetscapeGeometryMode.DISABLED
+            }
+        }
+    }
+
+    private fun configureSessionForFlags(
+        session: Session,
+        debugFlags: DebugPipelineFlags,
+        force: Boolean = false,
+    ) {
+        val geospatialRequested = debugFlags.geospatialEnabled
+        if (!force && configuredGeospatialRequested == geospatialRequested) return
+
+        val nowMs = SystemClock.elapsedRealtime()
+        if (!force && nowMs - lastGeospatialConfigureAttemptAtMs < GEOSPATIAL_RECONFIGURE_RETRY_MS) return
+        lastGeospatialConfigureAttemptAtMs = nowMs
+
+        val geospatialSupported = runCatching {
+            session.isGeospatialModeSupported(Config.GeospatialMode.ENABLED)
+        }.getOrDefault(false)
+        val config = createSessionConfig(
+            session = session,
+            geospatialEnabled = geospatialRequested && geospatialSupported,
+        )
+
+        runCatching {
+            session.configure(config)
+        }.onSuccess {
+            configuredGeospatialRequested = geospatialRequested
+            geospatialConfiguredActive = geospatialRequested && geospatialSupported
+            geospatialConfigureStatusLabel = when {
+                !geospatialRequested -> "off"
+                geospatialSupported -> "enabled"
+                else -> "unsupported"
+            }
+            Log.i(TAG, "ARCore session configured geospatial=$geospatialConfigureStatusLabel")
+        }.onFailure { error ->
+            geospatialConfiguredActive = false
+            geospatialConfigureStatusLabel = geospatialConfigureFailureLabel(error)
+            Log.w(TAG, "Failed to configure ARCore geospatial", error)
+        }
+    }
+
+    private fun geospatialConfigureFailureLabel(error: Throwable): String {
+        val className = error::class.java.simpleName
+        return when {
+            className.contains("FineLocationPermissionNotGranted", ignoreCase = true) -> "needs precise location"
+            className.contains("UnsupportedConfiguration", ignoreCase = true) -> "unsupported"
+            error.message.isNullOrBlank() -> "configure failed"
+            else -> "configure failed: ${error.message}"
         }
     }
 
@@ -387,7 +476,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     session.setCameraTextureName(cameraTextureId)
                 }
                 configurePlaybackIfRequested(session)
-                session.configure(createSessionConfig(session))
+                configureSessionForFlags(
+                    session = session,
+                    debugFlags = WalkAssistSettings.debugPipelineFlags(requireContext()),
+                    force = true,
+                )
                 configureRecordingIfRequested(session)
             }
         } catch (error: UnavailableException) {
@@ -426,6 +519,10 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         try {
             session.setCameraTextureName(cameraTextureId)
             session.setDisplayGeometry(displayRotation(), viewportWidth, viewportHeight)
+            configureSessionForFlags(
+                session = session,
+                debugFlags = WalkAssistSettings.debugPipelineFlags(requireContext()),
+            )
             val frame = session.update()
             backgroundRenderer.draw(frame)
             publishFrameState(frame)
@@ -439,7 +536,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     fun stopArCoreReplayRecording() {
         val session = arSession
         if (session == null || session.recordingStatus != RecordingStatus.OK) {
-            ArCoreReplayController.updateMessage("吏꾪뻾 以묒씤 ARCore ?뱁솕媛 ?놁뒿?덈떎.")
+            ArCoreReplayController.updateMessage("진행 중인 ARCore 녹화가 없습니다.")
             return
         }
         try {
@@ -451,7 +548,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     recordingStatus = session.recordingStatus.name,
                     playbackStatus = session.playbackStatus.name,
                     datasetUri = activeRecordingDatasetUri,
-                    message = "ARCore ?곗씠?곗뀑 ?뱁솕瑜???ν뻽?듬땲??",
+                    message = "ARCore 데이터셋 녹화를 저장했습니다.",
                 ),
             )
         } catch (error: RecordingFailedException) {
@@ -461,7 +558,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     recordingStatus = session.recordingStatus.name,
                     playbackStatus = session.playbackStatus.name,
                     datasetUri = activeRecordingDatasetUri,
-                    message = "ARCore ?뱁솕 以묒? ?ㅽ뙣: ${error.message ?: "?????녿뒗 ?ㅻ쪟"}",
+                    message = "ARCore 녹화 중지 실패: ${error.message ?: "알 수 없는 오류"}",
                 ),
             )
         }
@@ -495,7 +592,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     recordingStatus = session.recordingStatus.name,
                     playbackStatus = session.playbackStatus.name,
                     datasetUri = datasetUri,
-                    message = "ARCore ?곗씠?곗뀑 ?ъ깮??以鍮꾪뻽?듬땲??",
+                    message = "ARCore 데이터셋 재생을 준비했습니다.",
                 ),
             )
         } catch (error: Exception) {
@@ -505,7 +602,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     recordingStatus = session.recordingStatus.name,
                     playbackStatus = session.playbackStatus.name,
                     datasetUri = datasetUri,
-                    message = "ARCore ?곗씠?곗뀑 ?ъ깮 以鍮??ㅽ뙣: ${error.message ?: "?????녿뒗 ?ㅻ쪟"}",
+                    message = "ARCore 데이터셋 재생 준비 실패: ${error.message ?: "알 수 없는 오류"}",
                 ),
             )
         }
@@ -543,7 +640,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     recordingStatus = session.recordingStatus.name,
                     playbackStatus = session.playbackStatus.name,
                     datasetUri = datasetUri,
-                    message = "ARCore ?곗씠?곗뀑 ?뱁솕瑜??쒖옉?덉뒿?덈떎.",
+                    message = "ARCore 데이터셋 녹화를 시작했습니다.",
                 ),
             )
         } catch (error: Exception) {
@@ -555,7 +652,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     recordingStatus = session.recordingStatus.name,
                     playbackStatus = session.playbackStatus.name,
                     datasetUri = datasetUri,
-                    message = "ARCore ?뱁솕 ?쒖옉 ?ㅽ뙣: ${error.message ?: "?????녿뒗 ?ㅻ쪟"}",
+                    message = "ARCore 녹화 시작 실패: ${error.message ?: "알 수 없는 오류"}",
                 ),
             )
         }
@@ -576,12 +673,12 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             0
         }
         val message = when {
-            isRecording -> "ARCore ?곗씠?곗뀑 ?뱁솕 以묒엯?덈떎."
+            isRecording -> "ARCore 데이터셋 녹화 중입니다."
             playbackStatus == PlaybackStatus.OK && playbackMetadataCount > 0 ->
-                "ARCore ?곗씠?곗뀑 ?ъ깮 以묒엯?덈떎. ??硫뷀??곗씠??${playbackMetadataCount}嫄댁쓣 ?쎌뿀?듬땲??"
-            playbackStatus == PlaybackStatus.OK -> "ARCore ?곗씠?곗뀑 ?ъ깮 以묒엯?덈떎."
-            playbackStatus == PlaybackStatus.FINISHED -> "ARCore ?곗씠?곗뀑 ?ъ깮???앸궗?듬땲??"
-            playbackStatus == PlaybackStatus.IO_ERROR -> "ARCore ?곗씠?곗뀑 ?ъ깮 以?I/O ?ㅻ쪟媛 諛쒖깮?덉뒿?덈떎."
+                "ARCore 데이터셋 재생 중입니다. 앱 메타데이터 ${playbackMetadataCount}건을 읽었습니다."
+            playbackStatus == PlaybackStatus.OK -> "ARCore 데이터셋 재생 중입니다."
+            playbackStatus == PlaybackStatus.FINISHED -> "ARCore 데이터셋 재생이 끝났습니다."
+            playbackStatus == PlaybackStatus.IO_ERROR -> "ARCore 데이터셋 재생 중 I/O 오류가 발생했습니다."
             else -> ArCoreReplayController.currentState().message
         }
 
@@ -685,9 +782,194 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         ArDepthMeasurementLogger.append(requireContext().applicationContext, record)
     }
 
+    private fun geospatialRuntimeStatus(
+        session: Session?,
+        debugFlags: DebugPipelineFlags,
+    ): GeospatialRuntimeStatus {
+        if (!debugFlags.geospatialEnabled) {
+            return GeospatialRuntimeStatus(statusLabel = "off")
+        }
+        if (!geospatialConfiguredActive) {
+            return GeospatialRuntimeStatus(statusLabel = geospatialConfigureStatusLabel)
+        }
+
+        val earthStateLabel = runCatching {
+            val earth = session?.earth ?: return@runCatching ""
+            "earth=${earth.trackingState.name.lowercase()} ${earth.earthState.name.lowercase()}"
+        }.getOrDefault("")
+        val streetscapeCount = runCatching {
+            session
+                ?.getAllTrackables(StreetscapeGeometry::class.java)
+                .orEmpty()
+                .count { it.trackingState == TrackingState.TRACKING }
+        }.getOrDefault(0)
+
+        return GeospatialRuntimeStatus(
+            statusLabel = geospatialConfigureStatusLabel,
+            earthStateLabel = earthStateLabel,
+            streetscapeGeometryCount = streetscapeCount,
+        )
+    }
+
+    private fun computeGeospatialRouteGuidance(
+        session: Session?,
+        debugFlags: DebugPipelineFlags,
+    ): RouteCameraGuidance? {
+        if (!debugFlags.geospatialEnabled || !geospatialConfiguredActive) return null
+        val sharedRoute = SharedRouteNavigation.currentState()
+        if (!sharedRoute.active || sharedRoute.route.size < 2) return null
+
+        val earth = runCatching { session?.earth }.getOrNull() ?: return null
+        if (earth.trackingState != TrackingState.TRACKING) return null
+        val pose = runCatching { earth.cameraGeospatialPose }.getOrNull() ?: return null
+        val latitude = pose.latitude
+        val longitude = pose.longitude
+        val heading = cameraHeadingDegrees(pose) ?: return null
+        if (!latitude.isFinite() || !longitude.isFinite() || !heading.isFinite()) return null
+
+        val currentLocation = LatLng(latitude, longitude)
+        val nextGuidePoint = sharedRoute.nextGuidePoint(currentLocation)?.location
+            ?: sharedRoute.route.lastOrNull()
+
+        return routeGuidanceEngine.compute(
+            route = sharedRoute.route,
+            currentLocation = currentLocation,
+            cameraHeadingDegrees = heading,
+            nextGuidePoint = nextGuidePoint,
+        )
+    }
+
+    private fun cameraHeadingDegrees(pose: GeospatialPose): Double? {
+        val quaternion = pose.eastUpSouthQuaternion
+        if (quaternion.size < 4) return null
+        val qx = quaternion[0].toDouble()
+        val qy = quaternion[1].toDouble()
+        val qz = quaternion[2].toDouble()
+        val qw = quaternion[3].toDouble()
+
+        // Rotate the camera's local -Z optical axis into East-Up-South coordinates.
+        val east = -2.0 * ((qx * qz) + (qw * qy))
+        val south = -1.0 + (2.0 * qx * qx) + (2.0 * qy * qy)
+        val north = -south
+        val horizontalMagnitude = sqrt((east * east) + (north * north))
+        if (horizontalMagnitude < 0.12) return null
+
+        var heading = Math.toDegrees(atan2(east, north))
+        if (heading < 0.0) heading += 360.0
+        return heading
+    }
+
+    private fun computeCrosswalkFusion(
+        frame: Frame,
+        debugFlags: DebugPipelineFlags,
+    ): CrosswalkFusionResult {
+        val snapshot = lastCrosswalkFrameSnapshot
+        val pattern = if (
+            snapshot.timestampNanos > 0L &&
+            frame.timestamp >= snapshot.timestampNanos &&
+            frame.timestamp - snapshot.timestampNanos <= CROSSWALK_PATTERN_STALE_NANOS
+        ) {
+            snapshot.pattern
+        } else {
+            EMPTY_CROSSWALK_RESULT
+        }
+        val mapCue = computeCrosswalkMapCue(arSession, debugFlags)
+        val rawFusion = crosswalkPatternDetector.fuse(
+            pattern = pattern,
+            mapCue = mapCue,
+            previousScore = smoothedCrosswalkScore,
+        )
+        smoothedCrosswalkScore = rawFusion.score
+        crosswalkDetectionHistory += rawFusion.detected
+        while (crosswalkDetectionHistory.size > CROSSWALK_HISTORY_SIZE) {
+            crosswalkDetectionHistory.removeFirst()
+        }
+        val stableDetected = if (rawFusion.detected) {
+            crosswalkDetectionHistory.count { it } >= 2 || rawFusion.score >= 0.72f
+        } else {
+            crosswalkDetectionHistory.count { it } >= 3 && rawFusion.score >= 0.48f
+        }
+        return rawFusion.copy(detected = stableDetected)
+    }
+
+    private fun computeCrosswalkMapCue(
+        session: Session?,
+        debugFlags: DebugPipelineFlags,
+    ): CrosswalkMapCue {
+        if (!debugFlags.geospatialEnabled || !geospatialConfiguredActive) return CrosswalkMapCue(active = false, confidence = 0f)
+        val sharedRoute = SharedRouteNavigation.currentState()
+        if (!sharedRoute.active) return CrosswalkMapCue(active = false, confidence = 0f)
+        val crosswalkGuidePoints = sharedRoute.guidePoints.filter { point ->
+            point.description.contains("횡단보도") ||
+                point.description.contains("crosswalk", ignoreCase = true)
+        }
+        if (crosswalkGuidePoints.isEmpty()) return CrosswalkMapCue(active = false, confidence = 0f)
+
+        val earth = runCatching { session?.earth }.getOrNull() ?: return CrosswalkMapCue(active = false, confidence = 0f)
+        if (earth.trackingState != TrackingState.TRACKING) return CrosswalkMapCue(active = false, confidence = 0f)
+        val pose = runCatching { earth.cameraGeospatialPose }.getOrNull() ?: return CrosswalkMapCue(active = false, confidence = 0f)
+        val heading = cameraHeadingDegrees(pose)
+        if (!pose.latitude.isFinite() || !pose.longitude.isFinite()) return CrosswalkMapCue(active = false, confidence = 0f)
+        val currentLocation = LatLng(pose.latitude, pose.longitude)
+
+        val best = crosswalkGuidePoints
+            .map { point ->
+                val distance = currentLocation.distanceTo(point.location)
+                val bearing = bearingDegrees(currentLocation, point.location)
+                val delta = heading?.let { normalizeDeltaDegrees(bearing - it) }
+                val distanceScore = (1.0 - (distance / CROSSWALK_MAP_PRIOR_RADIUS_METERS)).coerceIn(0.0, 1.0)
+                val headingScore = delta
+                    ?.let { (1.0 - (abs(it) / CROSSWALK_HEADING_PRIOR_DEGREES)).coerceIn(0.0, 1.0) }
+                    ?: 0.55
+                val confidence = ((distanceScore * 0.68) + (headingScore * 0.32)).toFloat().coerceIn(0f, 1f)
+                Triple(point, distance, delta) to confidence
+            }
+            .filter { (_, confidence) -> confidence > 0f }
+            .maxByOrNull { it.second }
+            ?: return CrosswalkMapCue(active = false, confidence = 0f)
+
+        val distance = best.first.second
+        val delta = best.first.third
+        val headingOk = delta == null || abs(delta) <= CROSSWALK_HEADING_PRIOR_DEGREES
+        val active = distance <= CROSSWALK_MAP_PRIOR_RADIUS_METERS && headingOk && best.second >= 0.22f
+        return CrosswalkMapCue(
+            active = active,
+            confidence = if (active) best.second else 0f,
+            distanceMeters = distance.toFloat(),
+            headingDeltaDegrees = delta?.toFloat(),
+        )
+    }
+
+    private fun bearingDegrees(from: LatLng, to: LatLng): Double {
+        val fromLat = Math.toRadians(from.latitude)
+        val toLat = Math.toRadians(to.latitude)
+        val deltaLon = Math.toRadians(to.longitude - from.longitude)
+        val y = sin(deltaLon) * cos(toLat)
+        val x = (cos(fromLat) * sin(toLat)) - (sin(fromLat) * cos(toLat) * cos(deltaLon))
+        var bearing = Math.toDegrees(atan2(y, x))
+        if (bearing < 0.0) bearing += 360.0
+        return bearing
+    }
+
+    private fun normalizeDeltaDegrees(value: Double): Double {
+        var normalized = ((value + 540.0) % 360.0) - 180.0
+        if (normalized == -180.0) normalized = 180.0
+        return normalized
+    }
+
+    private fun routeGuidanceDetail(guidance: RouteCameraGuidance?): String {
+        if (guidance == null) return ""
+        val headingDelta = guidance.headingDeltaDegrees?.let { "${it.toInt()}deg" } ?: "--"
+        val routeBearing = guidance.routeBearingDegrees?.let { "${it.toInt()}deg" } ?: "--"
+        val pathDistance = guidance.distanceToPathMeters.toInt().coerceAtLeast(0)
+        return "경로 $routeBearing / 차이 $headingDelta / 이탈 ${pathDistance}m"
+    }
+
     private fun publishFrameState(frame: Frame) {
         val debugFlags = WalkAssistSettings.debugPipelineFlags(requireContext())
         val camera = frame.camera
+        val geospatialStatus = geospatialRuntimeStatus(arSession, debugFlags)
+        val routeGuidance = computeGeospatialRouteGuidance(arSession, debugFlags)
         updatePlaneMeshRendererVisibility(debugFlags.arCoreHitTestEnabled && planeMeshDebugVisible)
         updateReplayRuntimeState(frame)
         recordReplayAppMetadata(frame)
@@ -740,6 +1022,13 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     horizontalPlaneCount = horizontalPlaneCount,
                     verticalPlaneCount = verticalPlaneCount,
                     sensingConfidenceScore = 0,
+                    geospatialStatusLabel = geospatialStatus.statusLabel,
+                    geospatialEarthStateLabel = geospatialStatus.earthStateLabel,
+                    geospatialStreetscapeGeometryCount = geospatialStatus.streetscapeGeometryCount,
+                    routeRealityGuidanceLabel = routeGuidance?.message.orEmpty(),
+                    routeRealityGuidanceDetail = routeGuidanceDetail(routeGuidance),
+                    routeRealityGuidanceAction = routeGuidance?.action?.name?.lowercase().orEmpty(),
+                    routeRealityGuidanceSource = if (routeGuidance != null) "geospatial" else "",
                     guidanceLabel = "Scan the walking area slowly.",
                     statusLabel = "Move the phone slowly while depth samples stabilize.",
                     statusLevel = ArStatusLevel.INFO,
@@ -768,13 +1057,22 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         acquireArDepthFrame(frame, debugFlags.rawDepthEnabled).use { depthFrame ->
         val corridorHits = if (debugFlags.arCoreHitTestEnabled) sampleWorldCorridor(frame) else emptyList()
         val vlmVisionState = if (debugFlags.vlmEnabled) currentVlmVisionState(frame.timestamp) else null
+        val crosswalkFusion = computeCrosswalkFusion(frame, debugFlags)
         val rawDepthCorridorResult = if (debugFlags.rawDepthEnabled) {
             sampleRawDepthCorridor(frame, depthFrame)
         } else {
             RawDepthCorridorResult(hits = emptyList(), plannedSampleCount = 0, samples = emptyList())
         }
         val rawDepthHits = rawDepthCorridorResult.hits
-        val depthGridCells = if (debugFlags.rawDepthEnabled) sampleRawDepthGrid(frame, depthFrame) else emptyList()
+        val depthGridCells = if (debugFlags.rawDepthEnabled) {
+            sampleRawDepthGrid(
+                frame = frame,
+                depthFrame = depthFrame,
+                geospatialLongRangeEnabled = debugFlags.geospatialEnabled && geospatialConfiguredActive,
+            )
+        } else {
+            emptyList()
+        }
         val cameraPose = frame.camera.displayOrientedPose
         val mapObservations = (corridorHits + rawDepthHits).map {
             WorldMapObservation(
@@ -990,6 +1288,13 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 horizontalPlaneCount = horizontalPlaneCount,
                 verticalPlaneCount = verticalPlaneCount,
                 sensingConfidenceScore = sensingConfidenceScore,
+                geospatialStatusLabel = geospatialStatus.statusLabel,
+                geospatialEarthStateLabel = geospatialStatus.earthStateLabel,
+                geospatialStreetscapeGeometryCount = geospatialStatus.streetscapeGeometryCount,
+                routeRealityGuidanceLabel = routeGuidance?.message.orEmpty(),
+                routeRealityGuidanceDetail = routeGuidanceDetail(routeGuidance),
+                routeRealityGuidanceAction = routeGuidance?.action?.name?.lowercase().orEmpty(),
+                routeRealityGuidanceSource = if (routeGuidance != null) "geospatial" else "",
                 pitchDownDegrees = pitchDownDegrees,
                 leftLaneWidthRatio = 0.33f,
                 centerLaneWidthRatio = 0.34f,
@@ -1010,6 +1315,13 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 guidanceLabel = guidanceLabel,
                 statusLabel = statusLabel,
                 statusLevel = level,
+                crosswalkDetected = crosswalkFusion.detected,
+                crosswalkScore = crosswalkFusion.score,
+                crosswalkStripeCount = crosswalkFusion.stripeCount,
+                crosswalkYoloConfidence = crosswalkFusion.yoloConfidence,
+                crosswalkModeLabel = crosswalkFusion.modeLabel,
+                crosswalkMapDistanceMeters = crosswalkFusion.mapDistanceMeters,
+                crosswalkMapHeadingDeltaDegrees = crosswalkFusion.mapHeadingDeltaDegrees,
                 objectDetections = overlayDetections,
                 depthGridCells = depthGridCells,
                 walkingZoneDepthSamples = if (debugFlags.walkingZoneDistanceEnabled) {
@@ -1098,50 +1410,63 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             var shouldRunVlm = false
             var vlmStarted = false
             var shouldStreamLiveVlm = false
+            var bitmap: Bitmap? = null
             try {
-                val bitmap = image.toUprightBitmap(rotationDegrees)
-                image.close()
                 shouldRunOcr = oneShotOcrRequested.getAndSet(false)
                 shouldRunVlm = oneShotVlmRequested.getAndSet(false)
                 shouldStreamLiveVlm = liveVlmSessionActive.get() &&
                     debugFlags.vlmEnabled &&
                     SystemClock.elapsedRealtime() - lastLiveVlmFrameSentAtMs >= LIVE_VLM_FRAME_INTERVAL_MS
-                if (shouldRunVlm && debugFlags.vlmEnabled) {
-                    val vlmFrame = SpatialFrame(
-                        bitmap = bitmap,
-                        timestampMillis = frame.timestamp / 1_000_000L,
-                        source = SpatialFrameSource.LIVE_CAMERA,
-                        pitchRadians = pitchRadians,
-                        arState = arStateSnapshot,
-                        requestMode = VlmRequestMode.MANUAL,
-                    )
-                    startBackgroundVlmCaption(
-                        bitmap = bitmap,
-                        spatialFrame = vlmFrame,
-                        primaryAnalysis = EMPTY_FRAME_ANALYSIS,
-                        crosswalk = EMPTY_CROSSWALK_RESULT,
-                        timestampNanos = frame.timestamp,
-                    )
-                    vlmStarted = true
-                } else if (shouldRunVlm) {
+                if (shouldRunVlm && !debugFlags.vlmEnabled) {
                     appendVlmInvocationLog(
                         success = false,
                         resultModelName = null,
                         risk = null,
                         errorMessage = "vlm_pipeline_disabled",
                     )
-                    dispatchOneShotVlmResult("?붾쾭洹??ㅼ젙?먯꽌 VLM ?뚯씠?꾨씪?몄씠 爰쇱졇 ?덉뒿?덈떎.")
+                    dispatchOneShotVlmResult("디버그 설정에서 VLM 파이프라인이 꺼져 있습니다.")
                 }
+                if (!backgroundVisionEnabled &&
+                    !shouldRunOcr &&
+                    !(shouldRunVlm && debugFlags.vlmEnabled) &&
+                    !shouldStreamLiveVlm
+                ) {
+                    image.close()
+                    return@execute
+                }
+
+                val analysisBitmap = image.toUprightBitmap(
+                    rotationDegrees = rotationDegrees,
+                    maxLongSide = analysisInputMaxLongSide(
+                        shouldRunOcr = shouldRunOcr,
+                        shouldRunManualVlm = shouldRunVlm && debugFlags.vlmEnabled,
+                        shouldStreamLiveVlm = shouldStreamLiveVlm,
+                        backgroundVisionEnabled = backgroundVisionEnabled,
+                    ),
+                ).also { bitmap = it }
+                image.close()
                 if (shouldRunOcr) {
-                    ocrStarted = startOneShotOcr(bitmap)
+                    ocrStarted = startOneShotOcr(analysisBitmap)
                 }
                 val localObjectAnalyzer = if (debugFlags.yoloEnabled) objectAnalyzer else null
                 val detectedObjects = if (localObjectAnalyzer?.isReady() == true) {
-                    localObjectAnalyzer.detect(bitmap)
+                    localObjectAnalyzer.detect(analysisBitmap)
                 } else {
                     emptyList()
                 }
-                val crosswalk = EMPTY_CROSSWALK_RESULT
+                val yoloCrosswalkConfidence = detectedObjects
+                    .filter { it.label.equals("crosswalk", ignoreCase = true) }
+                    .maxOfOrNull { it.confidence }
+                    ?: 0f
+                val crosswalk = crosswalkPatternDetector.detect(
+                    bitmap = analysisBitmap,
+                    floorSegmentation = null,
+                    yoloConfidence = yoloCrosswalkConfidence,
+                )
+                lastCrosswalkFrameSnapshot = CrosswalkFrameSnapshot(
+                    pattern = crosswalk,
+                    timestampNanos = frame.timestamp,
+                )
                 val trackedDetections = objectTracker.update(
                     detections = detectedObjects.map { detection ->
                         DetectedObjectResult(
@@ -1171,7 +1496,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     pathMetrics = null,
                 )
                 val spatialFrame = SpatialFrame(
-                    bitmap = bitmap,
+                    bitmap = analysisBitmap,
                     timestampMillis = frame.timestamp / 1_000_000L,
                     source = SpatialFrameSource.LIVE_CAMERA,
                     pitchRadians = pitchRadians,
@@ -1184,7 +1509,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 }
                 if (shouldRunVlm && debugFlags.vlmEnabled && !vlmStarted) {
                     startBackgroundVlmCaption(
-                        bitmap = bitmap,
+                        bitmap = analysisBitmap,
                         spatialFrame = spatialFrame,
                         primaryAnalysis = primaryAnalysis,
                         crosswalk = crosswalk,
@@ -1200,13 +1525,13 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     .take(6)
                     .map { detection ->
                         val centerXRatio =
-                            ((detection.boundingBox.left + detection.boundingBox.right) * 0.5f / bitmap.width)
+                            ((detection.boundingBox.left + detection.boundingBox.right) * 0.5f / analysisBitmap.width)
                                 .coerceIn(0f, 1f)
                         ObjectOverlayDetection(
-                            leftRatio = (detection.boundingBox.left / bitmap.width).coerceIn(0f, 1f),
-                            topRatio = (detection.boundingBox.top / bitmap.height).coerceIn(0f, 1f),
-                            widthRatio = (detection.boundingBox.width() / bitmap.width).coerceIn(0.02f, 1f),
-                            heightRatio = (detection.boundingBox.height() / bitmap.height).coerceIn(0.02f, 1f),
+                            leftRatio = (detection.boundingBox.left / analysisBitmap.width).coerceIn(0f, 1f),
+                            topRatio = (detection.boundingBox.top / analysisBitmap.height).coerceIn(0f, 1f),
+                            widthRatio = (detection.boundingBox.width() / analysisBitmap.width).coerceIn(0.02f, 1f),
+                            heightRatio = (detection.boundingBox.height() / analysisBitmap.height).coerceIn(0.02f, 1f),
                             label = detection.label,
                             confidence = detection.confidence,
                             lane = classifyScreenLane(centerXRatio),
@@ -1218,10 +1543,9 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                         )
                     }
                 lastObjectDetections = prioritizedDetections
-                bitmap.recycle()
             } catch (_: Exception) {
                 runCatching { image.close() }
-                if (shouldRunVlm) {
+                if (shouldRunVlm && debugFlags.vlmEnabled) {
                     oneShotVlmRequested.set(false)
                     oneShotVlmInFlight.set(false)
                     appendVlmInvocationLog(
@@ -1230,15 +1554,31 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                         risk = null,
                         errorMessage = "frame_processing_failed",
                     )
-                    dispatchOneShotVlmResult("?λ㈃ 遺꾩꽍???ㅽ뙣?덉뒿?덈떎. ?좎떆 硫덉떠 二쇱꽭??")
+                    dispatchOneShotVlmResult("화면 분석에 실패했습니다. 잠시 멈춰 주세요.")
                 }
                 if (shouldRunOcr && !ocrStarted) {
                     oneShotOcrInFlight.set(false)
-                    dispatchOneShotOcrResult("臾몄옄瑜??쎌쓣 ?대?吏瑜?媛?몄삤吏 紐삵뻽?듬땲??")
+                    dispatchOneShotOcrResult("문자를 읽을 이미지를 가져오지 못했습니다.")
                 }
             } finally {
+                bitmap?.recycle()
                 detectionInFlight.set(false)
             }
+        }
+    }
+
+    private fun analysisInputMaxLongSide(
+        shouldRunOcr: Boolean,
+        shouldRunManualVlm: Boolean,
+        shouldStreamLiveVlm: Boolean,
+        backgroundVisionEnabled: Boolean,
+    ): Int? {
+        return when {
+            shouldRunOcr -> null
+            shouldRunManualVlm -> VLM_ANALYSIS_MAX_LONG_SIDE
+            backgroundVisionEnabled -> YOLO_ANALYSIS_MAX_LONG_SIDE
+            shouldStreamLiveVlm -> LIVE_VLM_ANALYSIS_MAX_LONG_SIDE
+            else -> YOLO_ANALYSIS_MAX_LONG_SIDE
         }
     }
 
@@ -1251,7 +1591,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             bitmap.copy(Bitmap.Config.ARGB_8888, false)
         } catch (_: Exception) {
             oneShotOcrInFlight.set(false)
-            dispatchOneShotOcrResult("臾몄옄瑜??쎌쓣 ?대?吏瑜?媛?몄삤吏 紐삵뻽?듬땲??")
+            dispatchOneShotOcrResult("문자를 읽을 이미지를 가져오지 못했습니다.")
             return false
         }
 
@@ -1358,7 +1698,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     )
                     dispatchOneShotVlmResult(interpretation.pathSummary)
                 } else {
-                    dispatchOneShotVlmResult("?λ㈃ 遺꾩꽍 寃곌낵瑜?諛쏆? 紐삵뻽?듬땲?? ?좎떆 ???ㅼ떆 ?뚮윭 二쇱꽭??")
+                    dispatchOneShotVlmResult("화면 분석 결과를 받지 못했습니다. 잠시 후 다시 눌러 주세요.")
                 }
             } catch (error: Exception) {
                 val buttonToAnswerLatencyMs = SystemClock.elapsedRealtime() - requestedAtMs
@@ -1372,7 +1712,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     errorMessage = error.message ?: error::class.java.simpleName,
                 )
                 Log.w(TAG, "Background VLM caption failed", error)
-                dispatchOneShotVlmResult("?λ㈃ 遺꾩꽍???ㅽ뙣?덉뒿?덈떎. ?ㅽ듃?뚰겕 ?곹깭瑜??뺤씤??二쇱꽭??")
+                dispatchOneShotVlmResult("화면 분석에 실패했습니다. 네트워크 상태를 확인해 주세요.")
             } finally {
                 oneShotVlmRequestedAtMs = 0L
                 oneShotVlmInFlight.set(false)
@@ -2090,11 +2430,17 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private fun sampleRawDepthGrid(
         frame: Frame,
         depthFrame: ArDepthFrame,
+        geospatialLongRangeEnabled: Boolean = false,
     ): List<DepthGridCell> {
         val width = viewWidth()
         val height = viewHeight()
         val rawDepthImage = depthFrame.rawDepthImage ?: return emptyList()
         val confidenceImage = depthFrame.rawDepthConfidenceImage ?: return emptyList()
+        val maxDepthMillimeters = if (geospatialLongRangeEnabled) {
+            GEOSPATIAL_DEPTH_VISUALIZATION_MAX_MM
+        } else {
+            RAW_DEPTH_VISUALIZATION_MAX_MM
+        }
 
         return buildList {
             for (row in 0 until 4) {
@@ -2107,6 +2453,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                         confidenceImage = confidenceImage,
                         viewX = viewX,
                         viewY = viewY,
+                        maxDepthMillimeters = maxDepthMillimeters,
                     )
                     add(
                         DepthGridCell(
@@ -2114,6 +2461,9 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                             row = row,
                             distanceMeters = sample?.depthMillimeters?.let { it / 1000f },
                             confidence = sample?.confidence ?: 0f,
+                            isLongRange = sample?.depthMillimeters?.let {
+                                it > RAW_DEPTH_VISUALIZATION_MAX_MM
+                            } ?: false,
                         ),
                     )
                 }
@@ -2127,6 +2477,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         confidenceImage: Image,
         viewX: Float,
         viewY: Float,
+        maxDepthMillimeters: Int = RAW_DEPTH_VISUALIZATION_MAX_MM,
     ): RawDepthSample? {
         val textureCoordinates = FloatArray(2)
         frame.transformCoordinates2d(
@@ -2144,6 +2495,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             confidenceImage = confidenceImage,
             centerX = (textureX * rawDepthImage.width).toInt().coerceIn(0, rawDepthImage.width - 1),
             centerY = (textureY * rawDepthImage.height).toInt().coerceIn(0, rawDepthImage.height - 1),
+            maxDepthMillimeters = maxDepthMillimeters,
         )
     }
 
@@ -2246,6 +2598,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         confidenceImage: Image,
         centerX: Int,
         centerY: Int,
+        maxDepthMillimeters: Int = RAW_DEPTH_VISUALIZATION_MAX_MM,
     ): RawDepthSample? {
         val validDepths = mutableListOf<Int>()
         var confidenceSum = 0f
@@ -2259,7 +2612,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 if (confidence < 80) continue
 
                 val depthMillimeters = getMillimetersDepth(depthImage = depthImage, x = sampleX, y = sampleY)
-                if (depthMillimeters in 150..10000) {
+                if (depthMillimeters in 150..maxDepthMillimeters) {
                     validDepths += depthMillimeters
                     confidenceSum += confidence / 255f
                 }
@@ -2321,106 +2674,143 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         }.coerceIn(0, 100)
     }
 
-    private fun Image.toUprightBitmap(rotationDegrees: Int): Bitmap {
-        val nv21 = yuv420888ToNv21(this)
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-        val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(Rect(0, 0, width, height), 88, out)
-        val jpegBytes = out.toByteArray()
-        val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
-            ?: error("Failed to decode ARCore camera frame")
-
-        if (rotationDegrees == 0) {
-            return bitmap
+    private fun Image.toUprightBitmap(
+        rotationDegrees: Int,
+        maxLongSide: Int?,
+    ): Bitmap {
+        val imageWidth = width
+        val imageHeight = height
+        val normalizedRotation = normalizeRotationDegrees(rotationDegrees)
+        val fullUprightWidth = if (normalizedRotation == 90 || normalizedRotation == 270) {
+            imageHeight
+        } else {
+            imageWidth
         }
-
-        val matrix = Matrix().apply {
-            postRotate(rotationDegrees.toFloat())
+        val fullUprightHeight = if (normalizedRotation == 90 || normalizedRotation == 270) {
+            imageWidth
+        } else {
+            imageHeight
         }
-        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-        if (rotated != bitmap) {
-            bitmap.recycle()
+        val boundedLongSide = maxLongSide?.takeIf { it > 0 }
+        val scale = boundedLongSide
+            ?.takeIf { max(fullUprightWidth, fullUprightHeight) > it }
+            ?.let { it.toFloat() / max(fullUprightWidth, fullUprightHeight).toFloat() }
+            ?: 1f
+        val outputWidth = (fullUprightWidth * scale).roundToInt().coerceAtLeast(1)
+        val outputHeight = (fullUprightHeight * scale).roundToInt().coerceAtLeast(1)
+        val pixelCount = outputWidth * outputHeight
+        if (frameArgbPixels.size < pixelCount) {
+            frameArgbPixels = IntArray(pixelCount)
         }
-        return rotated
+        yuv420888ToUprightArgbPixels(
+            image = this,
+            rotationDegrees = normalizedRotation,
+            output = frameArgbPixels,
+            outputWidth = outputWidth,
+            outputHeight = outputHeight,
+            fullUprightWidth = fullUprightWidth,
+            fullUprightHeight = fullUprightHeight,
+        )
+        return bitmapFromArgbPixels(
+            pixels = frameArgbPixels,
+            width = outputWidth,
+            height = outputHeight,
+        )
     }
 
-    private fun yuv420888ToNv21(image: Image): ByteArray {
+    private fun normalizeRotationDegrees(rotationDegrees: Int): Int {
+        return ((rotationDegrees % 360) + 360) % 360
+    }
+
+    private fun bitmapFromArgbPixels(
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+    ): Bitmap {
+        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+            setPixels(pixels, 0, width, 0, 0, width, height)
+        }
+    }
+
+    private fun yuv420888ToUprightArgbPixels(
+        image: Image,
+        output: IntArray,
+        rotationDegrees: Int,
+        outputWidth: Int,
+        outputHeight: Int,
+        fullUprightWidth: Int,
+        fullUprightHeight: Int,
+    ) {
         val yPlane = image.planes[0]
         val uPlane = image.planes[1]
         val vPlane = image.planes[2]
+        val yBuffer = yPlane.buffer
+        val uBuffer = uPlane.buffer
+        val vBuffer = vPlane.buffer
+        val width = image.width
+        val height = image.height
+        val xScale = fullUprightWidth.toFloat() / outputWidth.toFloat()
+        val yScale = fullUprightHeight.toFloat() / outputHeight.toFloat()
 
-        val ySize = image.width * image.height
-        val uvSize = image.width * image.height / 4
-        val nv21 = ByteArray(ySize + uvSize * 2)
-
-        copyPlane(
-            buffer = yPlane.buffer,
-            rowStride = yPlane.rowStride,
-            pixelStride = yPlane.pixelStride,
-            width = image.width,
-            height = image.height,
-            output = nv21,
-            outputOffset = 0,
-            outputStride = 1,
-        )
-        copyPlane(
-            buffer = vPlane.buffer,
-            rowStride = vPlane.rowStride,
-            pixelStride = vPlane.pixelStride,
-            width = image.width / 2,
-            height = image.height / 2,
-            output = nv21,
-            outputOffset = ySize,
-            outputStride = 2,
-        )
-        copyPlane(
-            buffer = uPlane.buffer,
-            rowStride = uPlane.rowStride,
-            pixelStride = uPlane.pixelStride,
-            width = image.width / 2,
-            height = image.height / 2,
-            output = nv21,
-            outputOffset = ySize + 1,
-            outputStride = 2,
-        )
-
-        return nv21
-    }
-
-    private fun copyPlane(
-        buffer: java.nio.ByteBuffer,
-        rowStride: Int,
-        pixelStride: Int,
-        width: Int,
-        height: Int,
-        output: ByteArray,
-        outputOffset: Int,
-        outputStride: Int,
-    ) {
-        buffer.rewind()
-        val rowBuffer = ByteArray(rowStride)
-        var outputIndex = outputOffset
-
-        for (row in 0 until height) {
-            val length = if (pixelStride == 1 && outputStride == 1) {
-                width
-            } else {
-                (width - 1) * pixelStride + 1
-            }
-
-            buffer.get(rowBuffer, 0, length)
-
-            var inputIndex = 0
-            for (col in 0 until width) {
-                output[outputIndex] = rowBuffer[inputIndex]
-                outputIndex += outputStride
-                inputIndex += pixelStride
-            }
-
-            if (row < height - 1) {
-                buffer.position(buffer.position() + rowStride - length)
+        var outputIndex = 0
+        for (outputY in 0 until outputHeight) {
+            val uprightY = ((outputY + 0.5f) * yScale) - 0.5f
+            for (outputX in 0 until outputWidth) {
+                val uprightX = ((outputX + 0.5f) * xScale) - 0.5f
+                val sourceXFloat: Float
+                val sourceYFloat: Float
+                when (rotationDegrees) {
+                    90 -> {
+                        sourceXFloat = uprightY
+                        sourceYFloat = (height - 1) - uprightX
+                    }
+                    180 -> {
+                        sourceXFloat = (width - 1) - uprightX
+                        sourceYFloat = (height - 1) - uprightY
+                    }
+                    270 -> {
+                        sourceXFloat = (width - 1) - uprightY
+                        sourceYFloat = uprightX
+                    }
+                    else -> {
+                        sourceXFloat = uprightX
+                        sourceYFloat = uprightY
+                    }
+                }
+                val sourceX = sourceXFloat.roundToInt().coerceIn(0, width - 1)
+                val sourceY = sourceYFloat.roundToInt().coerceIn(0, height - 1)
+                val yValue = yBuffer.getUnsigned((sourceY * yPlane.rowStride) + (sourceX * yPlane.pixelStride))
+                val uOffset = ((sourceY / 2) * uPlane.rowStride) + ((sourceX / 2) * uPlane.pixelStride)
+                val vOffset = ((sourceY / 2) * vPlane.rowStride) + ((sourceX / 2) * vPlane.pixelStride)
+                val uValue = uBuffer.getUnsigned(uOffset)
+                val vValue = vBuffer.getUnsigned(vOffset)
+                output[outputIndex++] = yuvToArgb(yValue, uValue, vValue)
             }
         }
+    }
+
+    private fun ByteBuffer.getUnsigned(index: Int): Int {
+        return get(index).toInt() and 0xFF
+    }
+
+    private fun yuvToArgb(
+        yValue: Int,
+        uValue: Int,
+        vValue: Int,
+    ): Int {
+        val y = (yValue - 16).coerceAtLeast(0)
+        val u = uValue - 128
+        val v = vValue - 128
+
+        val y1192 = 1192 * y
+        val red = clampRgb((y1192 + (1634 * v)) shr 10)
+        val green = clampRgb((y1192 - (833 * v) - (400 * u)) shr 10)
+        val blue = clampRgb((y1192 + (2066 * u)) shr 10)
+        return (0xFF shl 24) or (red shl 16) or (green shl 8) or blue
+    }
+
+    private fun clampRgb(value: Int): Int {
+        return value.coerceIn(0, 255)
     }
 
 
@@ -2583,17 +2973,17 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         riskLabel: String,
     ): String {
         if (collisionDistance == null) {
-            return "二쇰????몄떇?섎뒗 以묒엯?덈떎."
+            return "주변을 인식하는 중입니다."
         }
         if (riskLabel == "critical") {
-            return "?꾨갑 ?μ븷臾쇱씠 留ㅼ슦 媛源앹뒿?덈떎."
+            return "전방 장애물이 매우 가깝습니다."
         }
         if (riskLabel == "high") {
-            return "?꾨갑 ?μ븷臾쇱쓣 二쇱쓽?섏꽭??"
+            return "전방 장애물을 주의하세요."
         }
         return when (suggestedDirection) {
-            "blocked" -> "?꾨갑 怨듦컙??醫곸븘 蹂댁엯?덈떎."
-            else -> "?꾨갑 怨듦컙???몄떇 以묒엯?덈떎."
+            "blocked" -> "전방 공간이 좁아 보입니다."
+            else -> "전방 공간을 인식 중입니다."
         }
     }
 
@@ -2610,7 +3000,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         )
         val personDistance = nearestPerson?.distanceMeters ?: return baseLabel
         if (personDistance > 3.5f) return baseLabel
-        return "?꾨갑???щ엺??媛먯??섏뿀?듬땲??"
+        return "전방에 사람이 감지되었습니다."
     }
 
     private fun guidanceLabelWithVlm(
@@ -2619,8 +3009,8 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     ): String {
         if (vlmInterpretation == null) return primaryGuidanceLabel
         return when (vlmInterpretation.risk) {
-            VlmWalkingRisk.BLOCKED -> "?욎そ ?λ㈃ 遺꾩꽍???대룞???대젮??蹂댁엯?덈떎. $primaryGuidanceLabel"
-            VlmWalkingRisk.CAUTION -> "?욎そ ?λ㈃ 遺꾩꽍??二쇱쓽媛 ?꾩슂?⑸땲?? $primaryGuidanceLabel"
+            VlmWalkingRisk.BLOCKED -> "전방 화면 분석상 이동이 어려워 보입니다. $primaryGuidanceLabel"
+            VlmWalkingRisk.CAUTION -> "전방 화면 분석상 주의가 필요합니다. $primaryGuidanceLabel"
             else -> primaryGuidanceLabel
         }
     }
@@ -2642,7 +3032,17 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     companion object {
         private const val TAG = "WalkAssistVlm"
         private const val LIVE_VLM_FRAME_INTERVAL_MS = 500L
+        private const val YOLO_ANALYSIS_MAX_LONG_SIDE = 640
+        private const val VLM_ANALYSIS_MAX_LONG_SIDE = 768
+        private const val LIVE_VLM_ANALYSIS_MAX_LONG_SIDE = 384
         private const val DEPTH_MEASUREMENT_LOG_INTERVAL_MS = 1_000L
+        private const val GEOSPATIAL_RECONFIGURE_RETRY_MS = 2_000L
+        private const val CROSSWALK_PATTERN_STALE_NANOS = 1_500_000_000L
+        private const val CROSSWALK_HISTORY_SIZE = 5
+        private const val CROSSWALK_MAP_PRIOR_RADIUS_METERS = 45.0
+        private const val CROSSWALK_HEADING_PRIOR_DEGREES = 100.0
+        private const val RAW_DEPTH_VISUALIZATION_MAX_MM = 10_000
+        private const val GEOSPATIAL_DEPTH_VISUALIZATION_MAX_MM = 65_000
         private val EMPTY_FRAME_ANALYSIS = FrameAnalysis(
             detections = emptyList(),
             nearestObstacle = null,
