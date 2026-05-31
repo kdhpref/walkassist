@@ -47,6 +47,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
 import androidx.compose.ui.text.font.FontWeight
@@ -148,6 +150,7 @@ class MainActivity : AppCompatActivity() {
                         vlmButtonText = liveVlmButtonText(),
                         onStopReplayRecording = ::stopArCoreReplayRecording,
                         onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
+                        onDebugVisualizationChanged = ::setDebugVisualizationVisible,
                         onDebugFlagsPersisted = ::persistDebugPipelineFlags,
                     )
                 }
@@ -344,6 +347,13 @@ class MainActivity : AppCompatActivity() {
         fragment?.setPlaneMeshDebugVisible(visible)
     }
 
+    private fun setDebugVisualizationVisible(visible: Boolean) {
+        val fragment = arFragment
+            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
+                ?.also(::configureArFragment)
+        fragment?.setDebugVisualizationVisible(visible)
+    }
+
     private fun bindArStateToFeedback() {
         feedbackViewModel.startWatchdog()
         lifecycleScope.launch {
@@ -470,11 +480,13 @@ class MainActivity : AppCompatActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
-        window.attributes = window.attributes.apply {
-            layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 35) {
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-            } else {
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.attributes = window.attributes.apply {
+                layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= 35) {
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                } else {
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
             }
         }
     }
@@ -496,6 +508,7 @@ private fun WalkAssistRootOverlay(
     vlmButtonText: String,
     onStopReplayRecording: () -> Unit,
     onPlaneMeshDebugChanged: (Boolean) -> Unit,
+    onDebugVisualizationChanged: (Boolean) -> Unit,
     onDebugFlagsPersisted: (DebugPipelineFlags) -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
@@ -536,6 +549,7 @@ private fun WalkAssistRootOverlay(
                 debugFlags = debugFlags,
                 onDebugFlagsChanged = updateDebugFlags,
                 onPlaneMeshDebugChanged = onPlaneMeshDebugChanged,
+                onDebugVisualizationChanged = onDebugVisualizationChanged,
             )
             CameraUiControls(
                 onGuideClick = { cameraUiVisible = false },
@@ -877,28 +891,37 @@ private fun MeasurementOverlay(
     debugFlags: DebugPipelineFlags,
     onDebugFlagsChanged: (DebugPipelineFlags) -> Unit,
     onPlaneMeshDebugChanged: (Boolean) -> Unit,
+    onDebugVisualizationChanged: (Boolean) -> Unit,
 ) {
     var debugVisible by remember { mutableStateOf(false) }
 
     LaunchedEffect(debugVisible, debugFlags.arCoreHitTestEnabled) {
         onPlaneMeshDebugChanged(debugVisible && debugFlags.arCoreHitTestEnabled)
+        onDebugVisualizationChanged(debugVisible)
     }
     DisposableEffect(Unit) {
-        onDispose { onPlaneMeshDebugChanged(false) }
+        onDispose {
+            onPlaneMeshDebugChanged(false)
+            onDebugVisualizationChanged(false)
+        }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        ObjectDetectionOverlay(
-            detections = state.objectDetections,
-            modifier = Modifier.fillMaxSize(),
-        )
+        if (debugVisible) {
+            ObjectDetectionOverlay(
+                detections = state.objectDetections,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
-        CompactWorldMapOverlay(
-            state = state,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 14.dp, bottom = 18.dp),
-        )
+        if (debugVisible) {
+            CompactWorldMapOverlay(
+                state = state,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 14.dp, bottom = 18.dp),
+            )
+        }
 
         FeedbackOverlayCard(
             state = feedbackState,
@@ -1050,18 +1073,55 @@ private fun ObjectDetectionOverlay(
     BoxWithConstraints(modifier = modifier) {
         val labelBackground = Color(0xCC121820)
 
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            detections.forEach { detection ->
+                val polygon = detection.segmentPolygon
+                if (polygon.size >= 3) {
+                    val path = Path().apply {
+                        moveTo(polygon.first().xRatio * size.width, polygon.first().yRatio * size.height)
+                        polygon.drop(1).forEach { point ->
+                            lineTo(point.xRatio * size.width, point.yRatio * size.height)
+                        }
+                        close()
+                    }
+                    val color = if (detection.distanceMeters != null && detection.distanceMeters < 1.2f) {
+                        Color(0xFFE85D75)
+                    } else {
+                        Color(0xFFFFB648)
+                    }
+                    drawPath(
+                        path = path,
+                        color = color.copy(alpha = 0.28f),
+                    )
+                    drawPath(
+                        path = path,
+                        color = color.copy(alpha = 0.92f),
+                        style = Stroke(width = 3f),
+                    )
+                }
+            }
+        }
+
         detections.forEach { detection ->
             val boxLeft = maxWidth * detection.leftRatio.coerceIn(0f, 1f)
             val boxTop = maxHeight * detection.topRatio.coerceIn(0f, 1f)
             val boxWidth = maxWidth * detection.widthRatio.coerceIn(0.05f, 1f)
             val boxHeight = maxHeight * detection.heightRatio.coerceIn(0.05f, 1f)
+            val showFallbackBox = detection.segmentPolygon.size < 3
+            val boxModifier = Modifier
+                .offset(x = boxLeft, y = boxTop)
+                .width(boxWidth)
+                .height(boxHeight)
+                .let { base ->
+                    if (showFallbackBox) {
+                        base.border(2.dp, Color(0xFFFFB648), RoundedCornerShape(8.dp))
+                    } else {
+                        base
+                    }
+                }
 
             Box(
-                modifier = Modifier
-                    .offset(x = boxLeft, y = boxTop)
-                    .width(boxWidth)
-                    .height(boxHeight)
-                    .border(2.dp, Color(0xFFFFB648), RoundedCornerShape(8.dp)),
+                modifier = boxModifier,
             ) {
                 Text(
                     text = buildString {

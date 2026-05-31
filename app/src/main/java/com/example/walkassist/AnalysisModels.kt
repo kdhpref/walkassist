@@ -47,6 +47,11 @@ data class DetectedObjectResult(
     val segmentCoverageRatio: Float? = null,
     val segmentCenterXRatio: Float? = null,
     val segmentCenterYRatio: Float? = null,
+    val segmentLeftXRatio: Float? = null,
+    val segmentTopYRatio: Float? = null,
+    val segmentRightXRatio: Float? = null,
+    val segmentBottomYRatio: Float? = null,
+    val segmentPolygon: List<SegmentMaskPoint> = emptyList(),
     val trackingState: TrackingState? = null,
 )
 

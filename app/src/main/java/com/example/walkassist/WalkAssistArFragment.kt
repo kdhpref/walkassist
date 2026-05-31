@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.Image
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.opengl.GLES20
@@ -62,6 +63,8 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private data class BoxDepthEstimate(
         val distanceMeters: Float?,
         val isReference: Boolean = false,
+        val confidence: Float = 0f,
+        val sampleCount: Int = 0,
     )
 
     private data class LaneDistances(
@@ -201,6 +204,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private val oneShotVlmRequested = AtomicBoolean(false)
     private val oneShotVlmInFlight = AtomicBoolean(false)
     private var lastDetectionStartedAtMs = 0L
+    @Volatile
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
     @Volatile
     private var lastVlmVisionState: VlmVisionState? = null
@@ -229,6 +233,8 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var activeRecordingDatasetUri: Uri? = null
     private var customReplayTrackEnabled = false
     private var planeMeshDebugVisible = false
+    @Volatile
+    private var debugVisualizationVisible = false
     private var installRequested = false
     private var glSurfaceView: GLSurfaceView? = null
     private var arSession: Session? = null
@@ -334,6 +340,13 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     fun setPlaneMeshDebugVisible(visible: Boolean) {
         planeMeshDebugVisible = visible
         updatePlaneMeshRendererVisibility()
+    }
+
+    fun setDebugVisualizationVisible(visible: Boolean) {
+        debugVisualizationVisible = visible
+        if (!visible) {
+            lastObjectDetections = lastObjectDetections.map { it.copy(segmentPolygon = emptyList()) }
+        }
     }
 
     private fun updatePlaneMeshRendererVisibility(visible: Boolean = planeMeshDebugVisible) {
@@ -945,6 +958,17 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         return rawFusion.copy(detected = stableDetected)
     }
 
+    private fun yoloOnlyCrosswalkResult(yoloConfidence: Float): CrosswalkPatternResult {
+        val confidence = yoloConfidence.coerceIn(0f, 1f)
+        return CrosswalkPatternResult(
+            detected = confidence >= 0.55f,
+            score = (confidence * 0.62f).coerceIn(0f, 1f),
+            stripeCount = 0,
+            yoloConfidence = confidence,
+            modeLabel = if (confidence >= 0.35f) "yolo-only" else "none",
+        )
+    }
+
     private fun computeCrosswalkMapCue(
         session: Session?,
         debugFlags: DebugPipelineFlags,
@@ -1085,7 +1109,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     guidanceLabel = "Scan the walking area slowly.",
                     statusLabel = "Move the phone slowly while depth samples stabilize.",
                     statusLevel = ArStatusLevel.INFO,
-                    objectDetections = if (debugFlags.yoloEnabled) lastObjectDetections else emptyList(),
+                    objectDetections = if (debugFlags.yoloEnabled && debugVisualizationVisible) {
+                        lastObjectDetections
+                    } else {
+                        emptyList()
+                    },
                     planeDetections = emptyList(),
                     planePolygons = emptyList(),
                     worldMapRangeMeters = worldLocalMap.rangeMeters(),
@@ -1112,7 +1140,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val vlmVisionState = if (debugFlags.vlmEnabled) currentVlmVisionState(frame.timestamp) else null
         val crosswalkFusion = computeCrosswalkFusion(frame, debugFlags)
         val rawDepthCorridorResult = if (debugFlags.rawDepthEnabled) {
-            sampleRawDepthCorridor(frame, depthFrame)
+            sampleRawDepthCorridor(
+                frame = frame,
+                depthFrame = depthFrame,
+                includeVisualizationSamples = debugVisualizationVisible,
+            )
         } else {
             RawDepthCorridorResult(hits = emptyList(), plannedSampleCount = 0, samples = emptyList())
         }
@@ -1182,6 +1214,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     .thenBy { it.distanceMeters ?: Float.MAX_VALUE },
             )
             .firstOrNull()
+        val nearestBlockingObjectDetection = nearestBlockingObjectDetection(overlayDetections)
 
         val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left")
         val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center")
@@ -1203,7 +1236,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val smoothedRawDepth = smoothDistance(smoothedRawDepthDistance, rawDepthDistance).also {
             smoothedRawDepthDistance = it
         }
-        val fusedRawCollisionDistance = nearestPersonDetection?.distanceMeters ?: rawCollisionDistance
+        val fusedRawCollisionDistance = listOfNotNull(
+            nearestBlockingObjectDetection?.distanceMeters,
+            nearestPersonDetection?.distanceMeters,
+            rawCollisionDistance,
+        ).minOrNull()
         val collisionDistance = smoothDistance(smoothedCollisionDistance, fusedRawCollisionDistance).also {
             smoothedCollisionDistance = it
         }
@@ -1375,16 +1412,16 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 crosswalkModeLabel = crosswalkFusion.modeLabel,
                 crosswalkMapDistanceMeters = crosswalkFusion.mapDistanceMeters,
                 crosswalkMapHeadingDeltaDegrees = crosswalkFusion.mapHeadingDeltaDegrees,
-                objectDetections = overlayDetections,
-                depthGridCells = depthGridCells,
-                walkingZoneDepthSamples = if (debugFlags.walkingZoneDistanceEnabled) {
+                objectDetections = if (debugVisualizationVisible) overlayDetections else emptyList(),
+                depthGridCells = if (debugVisualizationVisible) depthGridCells else emptyList(),
+                walkingZoneDepthSamples = if (debugVisualizationVisible && debugFlags.walkingZoneDistanceEnabled) {
                     rawDepthCorridorResult.samples
                 } else {
                     emptyList()
                 },
                 planeDetections = emptyList(),
                 planePolygons = emptyList(),
-                worldMapCells = worldMapSnapshot,
+                worldMapCells = if (debugVisualizationVisible) worldMapSnapshot else emptyList(),
                 worldMapRangeMeters = worldLocalMap.rangeMeters(),
                 worldMapCellSizeMeters = worldLocalMap.cellSizeMeters(),
                 worldMapKnownCells = if (debugFlags.localMapEnabled) worldLocalMap.knownCellCount() else 0,
@@ -1454,6 +1491,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val rotationDegrees = displayRotationDegrees()
         val pitchRadians = Math.toRadians(computePitchDownDegrees(frame).toDouble()).toFloat()
         val arStateSnapshot = ArMeasurementBridge.state.value
+        val includeMaskPolygon = debugFlags.rawDepthEnabled || debugVisualizationVisible
 
         lastDetectionStartedAtMs = now
         detectionInFlight.set(true)
@@ -1488,6 +1526,94 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     return@execute
                 }
 
+                if (
+                    backgroundVisionEnabled &&
+                    !shouldRunOcr &&
+                    !(shouldRunVlm && debugFlags.vlmEnabled) &&
+                    !shouldStreamLiveVlm
+                ) {
+                    val detectedObjects = if (objectAnalyzer.isReady()) {
+                        objectAnalyzer.detect(
+                            image = image,
+                            rotationDegrees = rotationDegrees,
+                            includeMaskPolygon = includeMaskPolygon,
+                        )
+                    } else {
+                        emptyList()
+                    }
+                    image.close()
+                    val yoloCrosswalkConfidence = detectedObjects
+                        .filter { it.label.equals("crosswalk", ignoreCase = true) }
+                        .maxOfOrNull { it.confidence }
+                        ?: 0f
+                    lastCrosswalkFrameSnapshot = CrosswalkFrameSnapshot(
+                        pattern = yoloOnlyCrosswalkResult(yoloCrosswalkConfidence),
+                        timestampNanos = frame.timestamp,
+                    )
+                    val trackedDetections = objectTracker.update(
+                        detections = detectedObjects.map { detection ->
+                            DetectedObjectResult(
+                                boundingBox = detection.boundingBox,
+                                confidence = detection.confidence,
+                                imageHeight = detection.imageHeight,
+                                imageWidth = detection.imageWidth,
+                                label = detection.label,
+                                distanceEstimate = DetectionDistanceEstimate(
+                                    distanceMeters = null,
+                                    rawGeometryDistanceMeters = null,
+                                    qualityScore = detection.confidence,
+                                    source = DistanceSource.UNKNOWN,
+                                    riskLevel = RiskLevel.SAFE,
+                                ),
+                                segmentCoverageRatio = detection.segmentCoverageRatio,
+                                segmentCenterXRatio = detection.segmentCenterXRatio,
+                                segmentCenterYRatio = detection.segmentCenterYRatio,
+                                segmentLeftXRatio = detection.segmentLeftXRatio,
+                                segmentTopYRatio = detection.segmentTopYRatio,
+                                segmentRightXRatio = detection.segmentRightXRatio,
+                                segmentBottomYRatio = detection.segmentBottomYRatio,
+                                segmentPolygon = detection.segmentPolygon,
+                            )
+                        },
+                        timestampNanos = frame.timestamp,
+                    )
+                    lastObjectDetections = trackedDetections
+                        .sortedWith(
+                            compareByDescending<DetectedObjectResult> { it.trackingState?.isStable == true }
+                                .thenBy { it.trackingState?.missedFrames ?: 0 }
+                                .thenByDescending { it.confidence },
+                        )
+                        .take(6)
+                        .map { detection ->
+                            val imageWidth = detection.imageWidth.coerceAtLeast(1)
+                            val imageHeight = detection.imageHeight.coerceAtLeast(1)
+                            val centerXRatio = (detection.segmentCenterXRatio ?:
+                                ((detection.boundingBox.left + detection.boundingBox.right) * 0.5f /
+                                    imageWidth.toFloat()))
+                                .coerceIn(0f, 1f)
+                            ObjectOverlayDetection(
+                                leftRatio = (detection.boundingBox.left / imageWidth.toFloat()).coerceIn(0f, 1f),
+                                topRatio = (detection.boundingBox.top / imageHeight.toFloat()).coerceIn(0f, 1f),
+                                widthRatio = (detection.boundingBox.width() / imageWidth.toFloat()).coerceIn(0.02f, 1f),
+                                heightRatio = (detection.boundingBox.height() / imageHeight.toFloat()).coerceIn(0.02f, 1f),
+                                label = detection.label,
+                                confidence = detection.confidence,
+                                lane = classifyScreenLane(centerXRatio),
+                                isStable = detection.trackingState?.isStable == true,
+                                trackId = detection.trackingState?.trackId,
+                                segmentCoverageRatio = detection.segmentCoverageRatio,
+                                segmentCenterXRatio = detection.segmentCenterXRatio,
+                                segmentCenterYRatio = detection.segmentCenterYRatio,
+                                segmentLeftXRatio = detection.segmentLeftXRatio,
+                                segmentTopYRatio = detection.segmentTopYRatio,
+                                segmentRightXRatio = detection.segmentRightXRatio,
+                                segmentBottomYRatio = detection.segmentBottomYRatio,
+                                segmentPolygon = detection.segmentPolygon,
+                            )
+                        }
+                    return@execute
+                }
+
                 val analysisBitmap = image.toUprightBitmap(
                     rotationDegrees = rotationDegrees,
                     maxLongSide = analysisInputMaxLongSide(
@@ -1503,7 +1629,10 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 }
                 val localObjectAnalyzer = if (debugFlags.yoloEnabled) objectAnalyzer else null
                 val detectedObjects = if (localObjectAnalyzer?.isReady() == true) {
-                    localObjectAnalyzer.detect(analysisBitmap)
+                    localObjectAnalyzer.detect(
+                        bitmap = analysisBitmap,
+                        includeMaskPolygon = includeMaskPolygon,
+                    )
                 } else {
                     emptyList()
                 }
@@ -1538,6 +1667,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                             segmentCoverageRatio = detection.segmentCoverageRatio,
                             segmentCenterXRatio = detection.segmentCenterXRatio,
                             segmentCenterYRatio = detection.segmentCenterYRatio,
+                            segmentLeftXRatio = detection.segmentLeftXRatio,
+                            segmentTopYRatio = detection.segmentTopYRatio,
+                            segmentRightXRatio = detection.segmentRightXRatio,
+                            segmentBottomYRatio = detection.segmentBottomYRatio,
+                            segmentPolygon = detection.segmentPolygon,
                         )
                     },
                     timestampNanos = frame.timestamp,
@@ -1578,7 +1712,9 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     .take(6)
                     .map { detection ->
                         val centerXRatio =
-                            ((detection.boundingBox.left + detection.boundingBox.right) * 0.5f / analysisBitmap.width)
+                            (detection.segmentCenterXRatio ?:
+                                ((detection.boundingBox.left + detection.boundingBox.right) * 0.5f /
+                                    analysisBitmap.width))
                                 .coerceIn(0f, 1f)
                         ObjectOverlayDetection(
                             leftRatio = (detection.boundingBox.left / analysisBitmap.width).coerceIn(0f, 1f),
@@ -1593,6 +1729,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                             segmentCoverageRatio = detection.segmentCoverageRatio,
                             segmentCenterXRatio = detection.segmentCenterXRatio,
                             segmentCenterYRatio = detection.segmentCenterYRatio,
+                            segmentLeftXRatio = detection.segmentLeftXRatio,
+                            segmentTopYRatio = detection.segmentTopYRatio,
+                            segmentRightXRatio = detection.segmentRightXRatio,
+                            segmentBottomYRatio = detection.segmentBottomYRatio,
+                            segmentPolygon = detection.segmentPolygon,
                         )
                     }
                 lastObjectDetections = prioritizedDetections
@@ -1629,8 +1770,8 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         return when {
             shouldRunOcr -> null
             shouldRunManualVlm -> VLM_ANALYSIS_MAX_LONG_SIDE
-            backgroundVisionEnabled -> YOLO_ANALYSIS_MAX_LONG_SIDE
             shouldStreamLiveVlm -> LIVE_VLM_ANALYSIS_MAX_LONG_SIDE
+            backgroundVisionEnabled -> YOLO_ANALYSIS_MAX_LONG_SIDE
             else -> YOLO_ANALYSIS_MAX_LONG_SIDE
         }
     }
@@ -1798,7 +1939,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
     private fun displayRotation(): Int {
         return glSurfaceView?.display?.rotation
-            ?: activity?.display?.rotation
+            ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                activity?.display?.rotation
+            } else {
+                activity?.windowManager?.defaultDisplay?.rotation
+            }
             ?: Surface.ROTATION_0
     }
 
@@ -2029,6 +2174,17 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     ): BoxDepthEstimate {
         val width = viewWidth()
         val height = viewHeight()
+        computeSegmentMaskDepthEstimate(
+            frame = frame,
+            rawDepthImage = rawDepthImage,
+            confidenceImage = confidenceImage,
+            width = width,
+            height = height,
+            detection = detection,
+        )?.let {
+            return it
+        }
+
         val innerHits = sampleBoxDepthHits(
             frame = frame,
             rawDepthImage = rawDepthImage,
@@ -2065,13 +2221,134 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             return BoxDepthEstimate(
                 distanceMeters = 5f,
                 isReference = true,
+                confidence = innerHits.map { it.observationConfidence }.average().toFloat().coerceIn(0f, 1f),
+                sampleCount = innerHits.size,
             )
         }
 
         return BoxDepthEstimate(
             distanceMeters = innerHits.map { it.distanceMeters }.average().toFloat(),
             isReference = false,
+            confidence = innerHits.map { it.observationConfidence }.average().toFloat().coerceIn(0f, 1f),
+            sampleCount = innerHits.size,
         )
+    }
+
+    private fun computeSegmentMaskDepthEstimate(
+        frame: Frame,
+        rawDepthImage: Image,
+        confidenceImage: Image,
+        width: Float,
+        height: Float,
+        detection: ObjectOverlayDetection,
+    ): BoxDepthEstimate? {
+        val polygon = detection.segmentPolygon
+            .filter { it.xRatio.isFinite() && it.yRatio.isFinite() }
+            .map {
+                SegmentMaskPoint(
+                    xRatio = it.xRatio.coerceIn(0f, 1f),
+                    yRatio = it.yRatio.coerceIn(0f, 1f),
+                )
+            }
+        if (polygon.size < 3 || (detection.segmentCoverageRatio ?: 0f) < 0.003f) {
+            return null
+        }
+
+        val left = polygon.minOf { it.xRatio }.coerceIn(0f, 1f)
+        val right = polygon.maxOf { it.xRatio }.coerceIn(0f, 1f)
+        val top = polygon.minOf { it.yRatio }.coerceIn(0f, 1f)
+        val bottom = polygon.maxOf { it.yRatio }.coerceIn(0f, 1f)
+        val boundsWidth = right - left
+        val boundsHeight = bottom - top
+        if (boundsWidth < 0.015f || boundsHeight < 0.015f) return null
+
+        val columns = when {
+            boundsWidth > 0.42f -> 9
+            boundsWidth > 0.22f -> 7
+            else -> 5
+        }
+        val rows = when {
+            boundsHeight > 0.42f -> 9
+            boundsHeight > 0.22f -> 7
+            else -> 5
+        }
+
+        val hits = mutableListOf<CorridorHit>()
+        var plannedInsideSamples = 0
+        for (row in 0 until rows) {
+            val yRatio = top + boundsHeight * ((row + 0.5f) / rows.toFloat())
+            for (column in 0 until columns) {
+                val xRatio = left + boundsWidth * ((column + 0.5f) / columns.toFloat())
+                if (!pointInPolygon(xRatio = xRatio, yRatio = yRatio, polygon = polygon)) continue
+                plannedInsideSamples += 1
+                rawDepthHitAt(
+                    frame = frame,
+                    rawDepthImage = rawDepthImage,
+                    confidenceImage = confidenceImage,
+                    viewX = width * xRatio,
+                    viewY = height * yRatio,
+                    requireLane = false,
+                    maxForwardMeters = 10f,
+                )?.let { hits += it }
+            }
+        }
+
+        if (plannedInsideSamples < 5 || hits.size < 5) return null
+        val validRatio = hits.size / plannedInsideSamples.toFloat()
+        val averageConfidence = hits.map { it.observationConfidence }.average().toFloat().coerceIn(0f, 1f)
+        val depthConfidence = ((validRatio * 0.45f) + (averageConfidence * 0.55f)).coerceIn(0f, 1f)
+        if (depthConfidence < 0.42f) return null
+
+        val sortedDistances = hits.map { it.distanceMeters }.sorted()
+        val nearDistance = percentile(sortedDistances, 0.2f)
+        val medianDistance = percentile(sortedDistances, 0.5f)
+        val selectedDistance = when {
+            detection.lane == "center" && nearDistance != null -> nearDistance
+            nearDistance != null && medianDistance != null -> (nearDistance * 0.65f) + (medianDistance * 0.35f)
+            else -> medianDistance ?: nearDistance
+        } ?: return null
+
+        return BoxDepthEstimate(
+            distanceMeters = selectedDistance,
+            isReference = hits.count { it.isBeyondReliableRange } >= maxOf(4, hits.size / 2),
+            confidence = depthConfidence,
+            sampleCount = hits.size,
+        )
+    }
+
+    private fun pointInPolygon(
+        xRatio: Float,
+        yRatio: Float,
+        polygon: List<SegmentMaskPoint>,
+    ): Boolean {
+        var inside = false
+        var previousIndex = polygon.lastIndex
+        for (index in polygon.indices) {
+            val current = polygon[index]
+            val previous = polygon[previousIndex]
+            val crossesY = (current.yRatio > yRatio) != (previous.yRatio > yRatio)
+            if (crossesY) {
+                val denominator = previous.yRatio - current.yRatio
+                if (abs(denominator) > 0.000001f) {
+                    val intersectionX =
+                        ((previous.xRatio - current.xRatio) * (yRatio - current.yRatio) / denominator) +
+                            current.xRatio
+                    if (xRatio < intersectionX) inside = !inside
+                }
+            }
+            previousIndex = index
+        }
+        return inside
+    }
+
+    private fun percentile(
+        sortedValues: List<Float>,
+        percentile: Float,
+    ): Float? {
+        if (sortedValues.isEmpty()) return null
+        val index = ((sortedValues.size - 1) * percentile.coerceIn(0f, 1f)).roundToInt()
+            .coerceIn(0, sortedValues.lastIndex)
+        return sortedValues[index]
     }
 
     private fun updateObjectMotionTags(
@@ -2136,6 +2413,48 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 motionDirectionLabel = motionLabel,
                 avoidanceDirectionLabel = avoidanceLabel,
             )
+        }
+    }
+
+    private fun nearestBlockingObjectDetection(
+        detections: List<ObjectOverlayDetection>,
+    ): ObjectOverlayDetection? {
+        return detections
+            .asSequence()
+            .filter {
+                it.distanceMeters != null &&
+                    !it.distanceIsReference &&
+                    it.lane == "center" &&
+                    it.confidence >= 0.35f &&
+                    isBlockingObjectLabel(it.label)
+            }
+            .filter { it.distanceMeters!! <= 4.0f || it.objectTimeToCollisionSeconds?.let { ttc -> ttc <= 4.0f } == true }
+            .sortedWith(
+                compareBy<ObjectOverlayDetection> { if (it.isStable) 0 else 1 }
+                    .thenBy { it.objectTimeToCollisionSeconds ?: Float.MAX_VALUE }
+                    .thenBy { it.distanceMeters ?: Float.MAX_VALUE },
+            )
+            .firstOrNull()
+    }
+
+    private fun isBlockingObjectLabel(label: String): Boolean {
+        return when (label.lowercase()) {
+            "person",
+            "bicycle",
+            "car",
+            "motorcycle",
+            "bus",
+            "truck",
+            "chair",
+            "bench",
+            "dog",
+            "cat",
+            "stop sign",
+            "obstacle",
+            "potted plant",
+            "traffic light",
+            "fire hydrant" -> true
+            else -> false
         }
     }
 
@@ -2275,10 +2594,27 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         expandRatioY: Float = 0f,
         edgeOnly: Boolean = false,
     ): List<CorridorHit> {
-        val expandedLeft = (detection.leftRatio - expandRatioX).coerceIn(0f, 1f)
-        val expandedTop = (detection.topRatio - expandRatioY).coerceIn(0f, 1f)
-        val expandedRight = (detection.leftRatio + detection.widthRatio + expandRatioX).coerceIn(0f, 1f)
-        val expandedBottom = (detection.topRatio + detection.heightRatio + expandRatioY).coerceIn(0f, 1f)
+        val useSegmentBounds = (detection.segmentCoverageRatio ?: 0f) >= 0.015f &&
+            detection.segmentLeftXRatio != null &&
+            detection.segmentTopYRatio != null &&
+            detection.segmentRightXRatio != null &&
+            detection.segmentBottomYRatio != null
+        val baseLeft = if (useSegmentBounds) detection.segmentLeftXRatio!! else detection.leftRatio
+        val baseTop = if (useSegmentBounds) detection.segmentTopYRatio!! else detection.topRatio
+        val baseRight = if (useSegmentBounds) {
+            detection.segmentRightXRatio!!
+        } else {
+            detection.leftRatio + detection.widthRatio
+        }
+        val baseBottom = if (useSegmentBounds) {
+            detection.segmentBottomYRatio!!
+        } else {
+            detection.topRatio + detection.heightRatio
+        }
+        val expandedLeft = (baseLeft - expandRatioX).coerceIn(0f, 1f)
+        val expandedTop = (baseTop - expandRatioY).coerceIn(0f, 1f)
+        val expandedRight = (baseRight + expandRatioX).coerceIn(0f, 1f)
+        val expandedBottom = (baseBottom + expandRatioY).coerceIn(0f, 1f)
         val expandedWidth = (expandedRight - expandedLeft).coerceAtLeast(0.01f)
         val expandedHeight = (expandedBottom - expandedTop).coerceAtLeast(0.01f)
 
@@ -2414,6 +2750,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private fun sampleRawDepthCorridor(
         frame: Frame,
         depthFrame: ArDepthFrame,
+        includeVisualizationSamples: Boolean,
     ): RawDepthCorridorResult {
         val width = viewWidth()
         val height = viewHeight()
@@ -2438,40 +2775,55 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             ?: return RawDepthCorridorResult(
                 hits = emptyList(),
                 plannedSampleCount = plannedSampleCount,
-                samples = emptySamples(),
+                samples = if (includeVisualizationSamples) emptySamples() else emptyList(),
             )
         val confidenceImage = depthFrame.rawDepthConfidenceImage
             ?: return RawDepthCorridorResult(
                 hits = emptyList(),
                 plannedSampleCount = plannedSampleCount,
-                samples = emptySamples(),
+                samples = if (includeVisualizationSamples) emptySamples() else emptyList(),
             )
 
         val hits = mutableListOf<CorridorHit>()
-        val samples = buildList {
+        val samples = if (includeVisualizationSamples) {
+            buildList {
+                for (yRatio in sampleYs) {
+                    for (xRatio in sampleXs) {
+                        val hit = rawDepthHitAt(
+                            frame = frame,
+                            rawDepthImage = rawDepthImage,
+                            confidenceImage = confidenceImage,
+                            viewX = width * xRatio,
+                            viewY = height * yRatio,
+                        )
+                        if (hit != null) {
+                            hits += hit
+                        }
+                        add(
+                            WalkingZoneDepthSample(
+                                xRatio = xRatio,
+                                yRatio = yRatio,
+                                distanceMeters = hit?.distanceMeters,
+                                confidence = hit?.observationConfidence ?: 0f,
+                                lane = hit?.let { classifyLane(it.lateralMeters) } ?: classifyScreenLane(xRatio),
+                            ),
+                        )
+                    }
+                }
+            }
+        } else {
             for (yRatio in sampleYs) {
                 for (xRatio in sampleXs) {
-                    val hit = rawDepthHitAt(
+                    rawDepthHitAt(
                         frame = frame,
                         rawDepthImage = rawDepthImage,
                         confidenceImage = confidenceImage,
                         viewX = width * xRatio,
                         viewY = height * yRatio,
-                    )
-                    if (hit != null) {
-                        hits += hit
-                    }
-                    add(
-                        WalkingZoneDepthSample(
-                            xRatio = xRatio,
-                            yRatio = yRatio,
-                            distanceMeters = hit?.distanceMeters,
-                            confidence = hit?.observationConfidence ?: 0f,
-                            lane = hit?.let { classifyLane(it.lateralMeters) } ?: classifyScreenLane(xRatio),
-                        ),
-                    )
+                    )?.let { hits += it }
                 }
             }
+            emptyList()
         }
         return RawDepthCorridorResult(
             hits = hits,

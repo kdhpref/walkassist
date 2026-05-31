@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -437,18 +438,50 @@ private fun ReplayDetectionOverlay(
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier = modifier) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            detections.forEach { detection ->
+                val polygon = detection.segmentPolygon
+                if (polygon.size >= 3) {
+                    val path = Path().apply {
+                        moveTo(polygon.first().xRatio * size.width, polygon.first().yRatio * size.height)
+                        polygon.drop(1).forEach { point ->
+                            lineTo(point.xRatio * size.width, point.yRatio * size.height)
+                        }
+                        close()
+                    }
+                    drawPath(
+                        path = path,
+                        color = Color(0xFFFFB648).copy(alpha = 0.28f),
+                    )
+                    drawPath(
+                        path = path,
+                        color = Color(0xFFFFB648).copy(alpha = 0.92f),
+                        style = Stroke(width = 3f),
+                    )
+                }
+            }
+        }
+
         detections.forEach { detection ->
             val boxLeft = maxWidth * detection.leftRatio.coerceIn(0f, 1f)
             val boxTop = maxHeight * detection.topRatio.coerceIn(0f, 1f)
             val boxWidth = maxWidth * detection.widthRatio.coerceIn(0.02f, 1f)
             val boxHeight = maxHeight * detection.heightRatio.coerceIn(0.02f, 1f)
+            val showFallbackBox = detection.segmentPolygon.size < 3
+            val boxModifier = Modifier
+                .offset(x = boxLeft, y = boxTop)
+                .width(boxWidth)
+                .height(boxHeight)
+                .let { base ->
+                    if (showFallbackBox) {
+                        base.border(2.dp, Color(0xFFFFB648), RoundedCornerShape(6.dp))
+                    } else {
+                        base
+                    }
+                }
 
             Box(
-                modifier = Modifier
-                    .offset(x = boxLeft, y = boxTop)
-                    .width(boxWidth)
-                    .height(boxHeight)
-                    .border(2.dp, Color(0xFFFFB648), RoundedCornerShape(6.dp)),
+                modifier = boxModifier,
             ) {
                 Text(
                     text = buildString {

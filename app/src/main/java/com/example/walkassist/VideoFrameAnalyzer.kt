@@ -40,6 +40,19 @@ data class VideoFrameAnalysisResult(
 class VideoFrameAnalyzer(
     context: Context,
 ) {
+    private data class ReplayGuidanceState(
+        val leftDistance: Float?,
+        val centerDistance: Float?,
+        val rightDistance: Float?,
+        val collisionDistance: Float?,
+        val confidence: Float,
+        val riskLabel: String,
+        val suggestedDirection: String,
+        val statusLevel: ArStatusLevel,
+        val guidanceLabel: String,
+        val feedbackInput: FeedbackInput,
+    )
+
     private val appContext = context.applicationContext
     private val floorSegmenter = ModelFloorSegmenter(appContext)
     private val objectAnalyzer = ObjectAnalyzer(appContext)
@@ -59,28 +72,11 @@ class VideoFrameAnalyzer(
         pitchRadians: Float = DEFAULT_REPLAY_PITCH_RADIANS,
     ): VideoFrameAnalysisResult {
         val floorSegmentation = floorSegmenter.segment(bitmap)
-        val rawDetections = if (objectAnalyzer.isReady()) {
-            objectAnalyzer.detect(bitmap)
-        } else {
-            emptyList()
-        }
-        val detectedObjects = rawDetections.map { detection ->
-            DetectedObjectResult(
-                boundingBox = detection.boundingBox,
-                confidence = detection.confidence,
-                imageHeight = detection.imageHeight,
-                imageWidth = detection.imageWidth,
-                label = detection.label,
-                distanceEstimate = distanceEstimator.estimate(
-                    detection = detection,
-                    pitchRadians = pitchRadians,
-                    floorSegmentation = floorSegmentation,
-                ),
-                segmentCoverageRatio = detection.segmentCoverageRatio,
-                segmentCenterXRatio = detection.segmentCenterXRatio,
-                segmentCenterYRatio = detection.segmentCenterYRatio,
-            )
-        }
+        val rawDetections = detectObjects(bitmap)
+        val detectedObjects = rawDetections.toDistanceAwareObjects(
+            pitchRadians = pitchRadians,
+            floorSegmentation = floorSegmentation,
+        )
         val trackedObjects = objectTracker.update(
             detections = detectedObjects,
             timestampNanos = frameTimeMs * 1_000_000L,
@@ -92,113 +88,19 @@ class VideoFrameAnalyzer(
             imageWidth = bitmap.width,
             imageHeight = bitmap.height,
         )
-        val yoloCrosswalkConfidence = rawDetections
-            .filter { it.label.equals("crosswalk", ignoreCase = true) }
-            .maxOfOrNull { it.confidence } ?: 0f
         val crosswalk = crosswalkPatternDetector.detect(
             bitmap = bitmap,
             floorSegmentation = floorSegmentation,
-            yoloConfidence = yoloCrosswalkConfidence,
-        )
-        val primaryAnalysis = FrameAnalysis(
-            detections = trackedObjects,
-            nearestObstacle = trackedObjects
-                .mapNotNull { detection ->
-                    detection.distanceEstimate.distanceMeters?.let { distance -> detection to distance }
-                }
-                .minByOrNull { it.second }
-                ?.first,
-            floorSegmentation = floorSegmentation,
-            pathMetrics = pathMetrics,
-        )
-        val spatialFrame = SpatialFrame(
-            bitmap = bitmap,
-            timestampMillis = frameTimeMs,
-            source = SpatialFrameSource.VIDEO_REPLAY,
-            pitchRadians = pitchRadians,
+            yoloConfidence = rawDetections.crosswalkConfidence(),
         )
         val vlmInterpretation: VlmSceneInterpretation? = null
-        val overlayDetections = trackedObjects
-            .sortedWith(
-                compareByDescending<DetectedObjectResult> { it.trackingState?.isStable == true }
-                    .thenBy { it.trackingState?.missedFrames ?: 0 }
-                    .thenByDescending { it.confidence },
-            )
-            .take(8)
-            .map { detection ->
-                val centerXRatio = (
-                    (detection.boundingBox.left + detection.boundingBox.right) * 0.5f /
-                        bitmap.width.toFloat()
-                    ).coerceIn(0f, 1f)
-                ObjectOverlayDetection(
-                    leftRatio = (detection.boundingBox.left / bitmap.width).coerceIn(0f, 1f),
-                    topRatio = (detection.boundingBox.top / bitmap.height).coerceIn(0f, 1f),
-                    widthRatio = (detection.boundingBox.width() / bitmap.width).coerceIn(0.02f, 1f),
-                    heightRatio = (detection.boundingBox.height() / bitmap.height).coerceIn(0.02f, 1f),
-                    label = detection.label,
-                    confidence = detection.confidence,
-                    distanceMeters = detection.distanceEstimate.distanceMeters,
-                    lane = classifyScreenLane(centerXRatio),
-                    isStable = detection.trackingState?.isStable == true,
-                    trackId = detection.trackingState?.trackId,
-                    segmentCoverageRatio = detection.segmentCoverageRatio,
-                    segmentCenterXRatio = detection.segmentCenterXRatio,
-                    segmentCenterYRatio = detection.segmentCenterYRatio,
-                    objectTimeToCollisionSeconds = detection.trackingState?.timeToCollisionSeconds,
-                    objectClosingSpeedMetersPerSecond = detection.trackingState?.closingSpeedMetersPerSecond,
-                )
-            }
-        val leftDistance = overlayDetections
-            .filter { it.lane == "left" }
-            .mapNotNull { it.distanceMeters }
-            .minOrNull()
-        val centerDistance = listOfNotNull(
-            pathMetrics.collisionDistanceMeters,
-            pathMetrics.centerObstacleMeters,
-            overlayDetections
-                .filter { it.lane == "center" }
-                .mapNotNull { it.distanceMeters }
-                .minOrNull(),
-        ).minOrNull()
-        val rightDistance = overlayDetections
-            .filter { it.lane == "right" }
-            .mapNotNull { it.distanceMeters }
-            .minOrNull()
-        val collisionDistance = listOfNotNull(
-            centerDistance,
-            leftDistance,
-            rightDistance,
-            pathMetrics.pathClearMeters,
-        ).minOrNull()
-        val confidence = maxOf(
-            floorSegmentation.confidence,
-            overlayDetections.maxOfOrNull { it.confidence } ?: 0f,
-        ).coerceIn(0f, 1f)
-        val riskLabel = riskLabelFor(collisionDistance)
-        val suggestedDirection = suggestedDirectionFor(
-            leftDistance = leftDistance,
-            centerDistance = centerDistance,
-            rightDistance = rightDistance,
-            pathClearMeters = pathMetrics.pathClearMeters,
+        val overlayDetections = trackedObjects.toOverlayDetections(bitmap)
+        val guidanceState = buildReplayGuidanceState(
+            floorSegmentation = floorSegmentation,
+            pathMetrics = pathMetrics,
+            overlayDetections = overlayDetections,
+            vlmInterpretation = vlmInterpretation,
         )
-        val statusLevel = statusLevelFor(riskLabel)
-        val primaryGuidanceLabel = guidanceLabelFor(
-            collisionDistance = collisionDistance,
-            riskLabel = riskLabel,
-            suggestedDirection = suggestedDirection,
-        )
-        val guidanceLabel = guidanceLabelWithVlm(primaryGuidanceLabel, vlmInterpretation)
-        val feedbackInput = if (collisionDistance != null) {
-            FeedbackInput.Obstacle(
-                FeedbackObstacleSample(
-                    distanceMeters = collisionDistance,
-                    confidence = confidence,
-                    sensorType = FeedbackSensorType.VIDEO_REPLAY,
-                ),
-            )
-        } else {
-            FeedbackInput.SensorStatus(FeedbackSensorStatus.WAITING)
-        }
 
         return VideoFrameAnalysisResult(
             frameTimeMs = frameTimeMs,
@@ -220,26 +122,26 @@ class VideoFrameAnalyzer(
                 lastError = objectAnalyzer.lastErrorMessage,
             ),
             vlmInterpretation = vlmInterpretation,
-            feedbackInput = feedbackInput,
+            feedbackInput = guidanceState.feedbackInput,
             measurementState = ArMeasurementState(
                 trackingLabel = "video_replay",
-                sensingConfidenceScore = (confidence * 100f).toInt().coerceIn(0, 100),
+                sensingConfidenceScore = (guidanceState.confidence * 100f).toInt().coerceIn(0, 100),
                 leftLaneWidthRatio = 0.33f,
                 centerLaneWidthRatio = 0.34f,
                 rightLaneWidthRatio = 0.33f,
-                leftDistanceMeters = leftDistance,
-                centerDistanceMeters = centerDistance,
-                rightDistanceMeters = rightDistance,
-                suggestedDirection = suggestedDirection,
+                leftDistanceMeters = guidanceState.leftDistance,
+                centerDistanceMeters = guidanceState.centerDistance,
+                rightDistanceMeters = guidanceState.rightDistance,
+                suggestedDirection = guidanceState.suggestedDirection,
                 floorDistanceMeters = pathMetrics.pathClearMeters,
-                collisionDistanceMeters = collisionDistance,
+                collisionDistanceMeters = guidanceState.collisionDistance,
                 timeToCollisionSeconds = overlayDetections
                     .mapNotNull { it.objectTimeToCollisionSeconds }
                     .minOrNull(),
-                riskLabel = riskLabel,
-                guidanceLabel = guidanceLabel,
+                riskLabel = guidanceState.riskLabel,
+                guidanceLabel = guidanceState.guidanceLabel,
                 statusLabel = "영상 테스트 보행 안내",
-                statusLevel = statusLevel,
+                statusLevel = guidanceState.statusLevel,
                 crosswalkDetected = crosswalk.detected,
                 crosswalkScore = crosswalk.score,
                 crosswalkStripeCount = crosswalk.stripeCount,
@@ -258,6 +160,159 @@ class VideoFrameAnalyzer(
 
     fun close() {
         objectAnalyzer.close()
+        floorSegmenter.close()
+    }
+
+    private fun detectObjects(bitmap: Bitmap): List<RawDetection> {
+        return if (objectAnalyzer.isReady()) {
+            objectAnalyzer.detect(bitmap, includeMaskPolygon = true)
+        } else {
+            emptyList()
+        }
+    }
+
+    private fun List<RawDetection>.toDistanceAwareObjects(
+        pitchRadians: Float,
+        floorSegmentation: FloorSegmentationResult,
+    ): List<DetectedObjectResult> {
+        return map { detection ->
+            DetectedObjectResult(
+                boundingBox = detection.boundingBox,
+                confidence = detection.confidence,
+                imageHeight = detection.imageHeight,
+                imageWidth = detection.imageWidth,
+                label = detection.label,
+                distanceEstimate = distanceEstimator.estimate(
+                    detection = detection,
+                    pitchRadians = pitchRadians,
+                    floorSegmentation = floorSegmentation,
+                ),
+                segmentCoverageRatio = detection.segmentCoverageRatio,
+                segmentCenterXRatio = detection.segmentCenterXRatio,
+                segmentCenterYRatio = detection.segmentCenterYRatio,
+                segmentLeftXRatio = detection.segmentLeftXRatio,
+                segmentTopYRatio = detection.segmentTopYRatio,
+                segmentRightXRatio = detection.segmentRightXRatio,
+                segmentBottomYRatio = detection.segmentBottomYRatio,
+                segmentPolygon = detection.segmentPolygon,
+            )
+        }
+    }
+
+    private fun List<RawDetection>.crosswalkConfidence(): Float {
+        return filter { it.label.equals("crosswalk", ignoreCase = true) }
+            .maxOfOrNull { it.confidence } ?: 0f
+    }
+
+    private fun List<DetectedObjectResult>.toOverlayDetections(bitmap: Bitmap): List<ObjectOverlayDetection> {
+        return sortedWith(
+            compareByDescending<DetectedObjectResult> { it.trackingState?.isStable == true }
+                .thenBy { it.trackingState?.missedFrames ?: 0 }
+                .thenByDescending { it.confidence },
+        )
+            .take(MAX_OVERLAY_DETECTIONS)
+            .map { detection -> detection.toOverlayDetection(bitmap) }
+    }
+
+    private fun DetectedObjectResult.toOverlayDetection(bitmap: Bitmap): ObjectOverlayDetection {
+        val centerXRatio = (
+            segmentCenterXRatio ?:
+                ((boundingBox.left + boundingBox.right) * 0.5f / bitmap.width.toFloat())
+            ).coerceIn(0f, 1f)
+        return ObjectOverlayDetection(
+            leftRatio = (boundingBox.left / bitmap.width).coerceIn(0f, 1f),
+            topRatio = (boundingBox.top / bitmap.height).coerceIn(0f, 1f),
+            widthRatio = (boundingBox.width() / bitmap.width).coerceIn(0.02f, 1f),
+            heightRatio = (boundingBox.height() / bitmap.height).coerceIn(0.02f, 1f),
+            label = label,
+            confidence = confidence,
+            distanceMeters = distanceEstimate.distanceMeters,
+            lane = classifyScreenLane(centerXRatio),
+            isStable = trackingState?.isStable == true,
+            trackId = trackingState?.trackId,
+            segmentCoverageRatio = segmentCoverageRatio,
+            segmentCenterXRatio = segmentCenterXRatio,
+            segmentCenterYRatio = segmentCenterYRatio,
+            segmentLeftXRatio = segmentLeftXRatio,
+            segmentTopYRatio = segmentTopYRatio,
+            segmentRightXRatio = segmentRightXRatio,
+            segmentBottomYRatio = segmentBottomYRatio,
+            segmentPolygon = segmentPolygon,
+            objectTimeToCollisionSeconds = trackingState?.timeToCollisionSeconds,
+            objectClosingSpeedMetersPerSecond = trackingState?.closingSpeedMetersPerSecond,
+        )
+    }
+
+    private fun buildReplayGuidanceState(
+        floorSegmentation: FloorSegmentationResult,
+        pathMetrics: PathMetrics,
+        overlayDetections: List<ObjectOverlayDetection>,
+        vlmInterpretation: VlmSceneInterpretation?,
+    ): ReplayGuidanceState {
+        val leftDistance = overlayDetections.closestDistanceInLane("left")
+        val centerDistance = listOfNotNull(
+            pathMetrics.collisionDistanceMeters,
+            pathMetrics.centerObstacleMeters,
+            overlayDetections.closestDistanceInLane("center"),
+        ).minOrNull()
+        val rightDistance = overlayDetections.closestDistanceInLane("right")
+        val collisionDistance = listOfNotNull(
+            centerDistance,
+            leftDistance,
+            rightDistance,
+            pathMetrics.pathClearMeters,
+        ).minOrNull()
+        val confidence = maxOf(
+            floorSegmentation.confidence,
+            overlayDetections.maxOfOrNull { it.confidence } ?: 0f,
+        ).coerceIn(0f, 1f)
+        val riskLabel = riskLabelFor(collisionDistance)
+        val suggestedDirection = suggestedDirectionFor(
+            leftDistance = leftDistance,
+            centerDistance = centerDistance,
+            rightDistance = rightDistance,
+            pathClearMeters = pathMetrics.pathClearMeters,
+        )
+        val primaryGuidanceLabel = guidanceLabelFor(
+            collisionDistance = collisionDistance,
+            riskLabel = riskLabel,
+            suggestedDirection = suggestedDirection,
+        )
+        return ReplayGuidanceState(
+            leftDistance = leftDistance,
+            centerDistance = centerDistance,
+            rightDistance = rightDistance,
+            collisionDistance = collisionDistance,
+            confidence = confidence,
+            riskLabel = riskLabel,
+            suggestedDirection = suggestedDirection,
+            statusLevel = statusLevelFor(riskLabel),
+            guidanceLabel = guidanceLabelWithVlm(primaryGuidanceLabel, vlmInterpretation),
+            feedbackInput = feedbackInputFor(collisionDistance, confidence),
+        )
+    }
+
+    private fun List<ObjectOverlayDetection>.closestDistanceInLane(lane: String): Float? {
+        return filter { it.lane == lane }
+            .mapNotNull { it.distanceMeters }
+            .minOrNull()
+    }
+
+    private fun feedbackInputFor(
+        collisionDistance: Float?,
+        confidence: Float,
+    ): FeedbackInput {
+        return if (collisionDistance != null) {
+            FeedbackInput.Obstacle(
+                FeedbackObstacleSample(
+                    distanceMeters = collisionDistance,
+                    confidence = confidence,
+                    sensorType = FeedbackSensorType.VIDEO_REPLAY,
+                ),
+            )
+        } else {
+            FeedbackInput.SensorStatus(FeedbackSensorStatus.WAITING)
+        }
     }
 
     private fun classifyScreenLane(centerXRatio: Float): String {
@@ -337,6 +392,7 @@ class VideoFrameAnalyzer(
 
     companion object {
         const val DEFAULT_FRAME_INTERVAL_MS = 300L
+        private const val MAX_OVERLAY_DETECTIONS = 8
         val DEFAULT_REPLAY_PITCH_RADIANS: Float = (25.0 * PI / 180.0).toFloat()
     }
 }

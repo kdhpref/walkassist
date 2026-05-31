@@ -301,9 +301,12 @@ class GuideSettingsActivity : AppCompatActivity() {
 
     private fun createReplayThumbnail(dataset: ArCoreReplayDataset): Bitmap? {
         return runCatching {
-            MediaMetadataRetriever().use { retriever ->
+            val retriever = MediaMetadataRetriever()
+            try {
                 retriever.setDataSource(dataset.absolutePath)
                 retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } finally {
+                retriever.release()
             }
         }.getOrNull()
     }

@@ -12,6 +12,16 @@ data class RawDetection(
     val segmentCoverageRatio: Float? = null,
     val segmentCenterXRatio: Float? = null,
     val segmentCenterYRatio: Float? = null,
+    val segmentLeftXRatio: Float? = null,
+    val segmentTopYRatio: Float? = null,
+    val segmentRightXRatio: Float? = null,
+    val segmentBottomYRatio: Float? = null,
+    val segmentPolygon: List<SegmentMaskPoint> = emptyList(),
+)
+
+data class SegmentMaskPoint(
+    val xRatio: Float,
+    val yRatio: Float,
 )
 
 class DistanceEstimator(
@@ -87,6 +97,15 @@ class DistanceEstimator(
         detection: RawDetection,
         floorSegmentation: FloorSegmentationResult?,
     ): Float? {
+        val segmentBottomY = detection.segmentBottomYRatio
+        if (
+            segmentBottomY != null &&
+            (detection.segmentCoverageRatio ?: 0f) >= 0.015f
+        ) {
+            return (segmentBottomY * detection.imageHeight.toFloat())
+                .coerceIn(detection.boundingBox.top, detection.imageHeight.toFloat())
+        }
+
         val segmentation = floorSegmentation ?: return null
         if (segmentation.confidence < 0.2f) return null
 
