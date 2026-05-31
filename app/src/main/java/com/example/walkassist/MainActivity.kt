@@ -90,7 +90,7 @@ class MainActivity : AppCompatActivity() {
     private var lowDistanceConfidenceStartedAtMs = 0L
     private var lastLowDistanceConfidenceAnnouncementAtMs = 0L
     private var awaitingDistanceConfidenceRecoveryAnnouncement = false
-    private var lastHeuristicObstaclePulseAtMs = 0L
+    private var lastLocalMapObstaclePulseAtMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -326,7 +326,7 @@ class MainActivity : AppCompatActivity() {
                 launch {
                     ArMeasurementBridge.state.collect { state ->
                         maybeAnnounceLowDistanceConfidence(state)
-                        maybePulseHeuristicObstacle(state)
+                        maybePulseLocalMapObstacle(state)
                         feedbackViewModel.onInput(arFeedbackMapper.map(state))
                     }
                 }
@@ -404,26 +404,26 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun maybePulseHeuristicObstacle(state: ArMeasurementState) {
-        val obstacleDistance = state.heuristicObstacleDistanceMeters ?: return
-        if (state.trackingLabel != "tracking" || state.sensingConfidenceScore < LOW_DISTANCE_CONFIDENCE_SCORE_THRESHOLD) {
+    private fun maybePulseLocalMapObstacle(state: ArMeasurementState) {
+        val obstacleDistance = state.collisionDistanceMeters ?: return
+        if (state.trackingLabel != "tracking" || state.worldMapOccupiedCells <= 0) {
             return
         }
 
-        val urgent = obstacleDistance <= HEURISTIC_URGENT_OBSTACLE_METERS
-        val watch = obstacleDistance <= HEURISTIC_WATCH_OBSTACLE_METERS
+        val urgent = obstacleDistance <= LOCAL_MAP_URGENT_OBSTACLE_METERS
+        val watch = obstacleDistance <= LOCAL_MAP_WATCH_OBSTACLE_METERS
         if (!urgent && !watch) return
 
         val now = SystemClock.elapsedRealtime()
         val intervalMs = if (urgent) {
-            HEURISTIC_URGENT_PULSE_INTERVAL_MS
+            LOCAL_MAP_URGENT_PULSE_INTERVAL_MS
         } else {
-            HEURISTIC_WATCH_PULSE_INTERVAL_MS
+            LOCAL_MAP_WATCH_PULSE_INTERVAL_MS
         }
-        if (now - lastHeuristicObstaclePulseAtMs < intervalMs) return
+        if (now - lastLocalMapObstaclePulseAtMs < intervalMs) return
 
         feedbackManager.playObstaclePulse(urgent = urgent)
-        lastHeuristicObstaclePulseAtMs = now
+        lastLocalMapObstaclePulseAtMs = now
     }
 
     private fun shouldMonitorDistanceConfidence(state: ArMeasurementState): Boolean {
@@ -566,10 +566,10 @@ class MainActivity : AppCompatActivity() {
         private const val LOW_DISTANCE_CONFIDENCE_MESSAGE =
             "거리 신뢰도값이 낮음. 바닥과 주변 경계를 인식할 수 있도록 천천히 카메라를 움직여주세요."
         private const val DISTANCE_CONFIDENCE_RECOVERED_MESSAGE = "거리측정 활성화"
-        private const val HEURISTIC_WATCH_OBSTACLE_METERS = 3.0f
-        private const val HEURISTIC_URGENT_OBSTACLE_METERS = 1.3f
-        private const val HEURISTIC_WATCH_PULSE_INTERVAL_MS = 2_000L
-        private const val HEURISTIC_URGENT_PULSE_INTERVAL_MS = 1_000L
+        private const val LOCAL_MAP_WATCH_OBSTACLE_METERS = 3.0f
+        private const val LOCAL_MAP_URGENT_OBSTACLE_METERS = 1.3f
+        private const val LOCAL_MAP_WATCH_PULSE_INTERVAL_MS = 2_000L
+        private const val LOCAL_MAP_URGENT_PULSE_INTERVAL_MS = 1_000L
     }
 }
 

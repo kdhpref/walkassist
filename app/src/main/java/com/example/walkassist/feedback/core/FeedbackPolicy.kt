@@ -13,10 +13,10 @@ import java.util.Locale
  * 5 = SAFE / 무음
  */
 object FeedbackThresholds {
-    const val PRIORITY_1_METERS = 0.5f
-    const val PRIORITY_2_METERS = 1.0f
-    const val PRIORITY_3_METERS = 1.5f
-    const val PRIORITY_4_METERS = 2.0f
+    const val PRIORITY_1_METERS = 1.3f
+    const val PRIORITY_2_METERS = 1.3f
+    const val PRIORITY_3_METERS = 3.0f
+    const val PRIORITY_4_METERS = 3.0f
 
     const val EXIT_BUFFER = 0.2f
 
@@ -43,8 +43,8 @@ object FeedbackThresholds {
      * 이 값들은 FeedbackPolicy가 요청을 만들 때 기준값으로 넣습니다.
      */
     const val CRITICAL_OBSTACLE_THROTTLE_MS = 1_000L
-    const val DANGER_OBSTACLE_THROTTLE_MS = 1_500L
-    const val CAUTION_OBSTACLE_THROTTLE_MS = 3_000L
+    const val DANGER_OBSTACLE_THROTTLE_MS = 1_000L
+    const val CAUTION_OBSTACLE_THROTTLE_MS = 2_000L
     const val HAPTIC_ONLY_THROTTLE_MS = 2_000L
     const val NAVIGATION_THROTTLE_MS = 2_500L
     const val OCR_THROTTLE_MS = 1_000L
@@ -80,7 +80,7 @@ class FeedbackPolicy {
                     1,
                     FeedbackAlertLevel.DANGER,
                     FeedbackOutputMode(
-                        useSpeech = true,
+                        useSpeech = false,
                         useHaptic = true,
                         hapticStrength = HapticStrength.STRONG
                     )
@@ -92,7 +92,7 @@ class FeedbackPolicy {
                     2,
                     FeedbackAlertLevel.DANGER,
                     FeedbackOutputMode(
-                        useSpeech = true,
+                        useSpeech = false,
                         useHaptic = true,
                         hapticStrength = HapticStrength.MEDIUM
                     )
@@ -104,7 +104,7 @@ class FeedbackPolicy {
                     3,
                     FeedbackAlertLevel.CAUTION,
                     FeedbackOutputMode(
-                        useSpeech = true,
+                        useSpeech = false,
                         useHaptic = true,
                         hapticStrength = HapticStrength.LIGHT
                     )

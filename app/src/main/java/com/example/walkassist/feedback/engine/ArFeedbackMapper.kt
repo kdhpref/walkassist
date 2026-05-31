@@ -10,9 +10,6 @@ class ArFeedbackMapper {
 
     fun map(state: ArMeasurementState): FeedbackInput {
         val distance = state.collisionDistanceMeters
-            ?: state.centerDistanceMeters
-            ?: state.depthDistanceMeters
-            ?: state.floorDistanceMeters
 
         val sensorType = when (state.trackingLabel) {
             "tracking" -> FeedbackSensorType.ARCORE
@@ -37,7 +34,7 @@ class ArFeedbackMapper {
                 FeedbackInput.Obstacle(
                     sample = FeedbackObstacleSample(
                         distanceMeters = distance,
-                        confidence = (state.sensingConfidenceScore / 100f).coerceIn(0f, 1f),
+                        confidence = (state.worldMapConfidenceScore / 100f).coerceIn(0f, 1f),
                         sensorType = sensorType,
                     ),
                     direction = state.suggestedDirection,

@@ -1140,8 +1140,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     .thenBy { it.distanceMeters ?: Float.MAX_VALUE },
             )
             .firstOrNull()
-        val nearestBlockingObjectDetection = nearestBlockingObjectDetection(overlayDetections)
-
         val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left", pitchDownDegrees)
         val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center", pitchDownDegrees)
         val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right", pitchDownDegrees)
@@ -1150,16 +1148,8 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val wallDistance = listOfNotNull(leftLane.wall, centerLane.wall, rightLane.wall).minOrNull()
         val depthDistance = listOfNotNull(leftLane.depth, centerLane.depth, rightLane.depth).minOrNull()
         val rawDepthDistance = listOfNotNull(leftLane.rawDepth, centerLane.rawDepth, rightLane.rawDepth).minOrNull()
-        val heuristicObstacleDistance = listOfNotNull(
-            leftLane.heuristicObstacle,
-            centerLane.heuristicObstacle,
-            rightLane.heuristicObstacle,
-        ).minOrNull()
-        val rawCollisionDistance = listOfNotNull(
-            leftLane.collision,
-            centerLane.collision,
-            rightLane.collision,
-        ).minOrNull()
+        val heuristicObstacleDistance: Float? = null
+        val localMapCollisionDistance = worldMapLaneMetrics.collisionDistance
 
         val smoothedFloor = smoothDistance(smoothedFloorDistance, floorDistance).also { smoothedFloorDistance = it }
         val smoothedWall = smoothDistance(smoothedWallDistance, wallDistance).also { smoothedWallDistance = it }
@@ -1167,29 +1157,27 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val smoothedRawDepth = smoothDistance(smoothedRawDepthDistance, rawDepthDistance).also {
             smoothedRawDepthDistance = it
         }
-        val fusedRawCollisionDistance = listOfNotNull(
-            nearestBlockingObjectDetection?.distanceMeters,
-            nearestPersonDetection?.distanceMeters,
-            rawCollisionDistance,
-        ).minOrNull()
-        val collisionDistance = smoothDistance(smoothedCollisionDistance, fusedRawCollisionDistance).also {
+        val collisionDistance = smoothLocalMapDistance(
+            previous = smoothedCollisionDistance,
+            current = localMapCollisionDistance,
+        ).also {
             smoothedCollisionDistance = it
         }
-        val leftDistance = smoothDistance(
-            smoothedLeftDistance,
-            leftLane.collision,
+        val leftDistance = smoothLocalMapDistance(
+            previous = smoothedLeftDistance,
+            current = worldMapLaneMetrics.leftDistance,
         ).also {
             smoothedLeftDistance = it
         }
-        val centerDistance = smoothDistance(
-            smoothedCenterDistance,
-            centerLane.collision,
+        val centerDistance = smoothLocalMapDistance(
+            previous = smoothedCenterDistance,
+            current = worldMapLaneMetrics.centerDistance,
         ).also {
             smoothedCenterDistance = it
         }
-        val rightDistance = smoothDistance(
-            smoothedRightDistance,
-            rightLane.collision,
+        val rightDistance = smoothLocalMapDistance(
+            previous = smoothedRightDistance,
+            current = worldMapLaneMetrics.rightDistance,
         ).also {
             smoothedRightDistance = it
         }
@@ -3033,6 +3021,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val delta = abs(current - previous)
         val alpha = if (delta > 0.7f) 0.18f else 0.3f
         return previous + ((current - previous) * alpha)
+    }
+
+    private fun smoothLocalMapDistance(previous: Float?, current: Float?): Float? {
+        if (current == null) return null
+        return smoothDistance(previous, current)
     }
 
     private fun formatMetersForNote(distanceMeters: Float): String {
