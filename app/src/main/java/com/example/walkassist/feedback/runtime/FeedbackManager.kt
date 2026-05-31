@@ -1,6 +1,8 @@
 package com.example.walkassist.feedback.runtime
 
 import android.content.Context
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.util.Log
@@ -15,6 +17,7 @@ class FeedbackManager(context: Context) {
     private val accessibilityAnnouncer = AccessibilityAnnouncer(context)
     private val hapticController = HapticFeedbackController(context)
     private val speechController = SpeechFeedbackController(context)
+    private val toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, TONE_VOLUME_PERCENT)
     private var prioritySpeechProtectedUntilMs = 0L
 
     fun provideFeedback(
@@ -113,8 +116,21 @@ class FeedbackManager(context: Context) {
         )
     }
 
+    fun playObstaclePulse(urgent: Boolean) {
+        val level = if (urgent) FeedbackAlertLevel.DANGER else FeedbackAlertLevel.CAUTION
+        toneGenerator.startTone(
+            ToneGenerator.TONE_PROP_BEEP,
+            if (urgent) URGENT_PULSE_TONE_MS else WATCH_PULSE_TONE_MS,
+        )
+        hapticController.vibrate(
+            level = level,
+            strength = if (urgent) HapticStrength.STRONG else HapticStrength.MEDIUM,
+        )
+    }
+
     fun release() {
         hapticController.cancel()
+        toneGenerator.release()
         speechController.release()
     }
 
@@ -183,5 +199,8 @@ class FeedbackManager(context: Context) {
     companion object {
         private const val TAG = "FeedbackManager"
         private const val PRIORITY_SPEECH_PROTECTION_MS = 8_000L
+        private const val TONE_VOLUME_PERCENT = 80
+        private const val WATCH_PULSE_TONE_MS = 120
+        private const val URGENT_PULSE_TONE_MS = 80
     }
 }

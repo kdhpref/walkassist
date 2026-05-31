@@ -172,10 +172,7 @@ class FeedbackViewModel(
             confidence = input.sample.confidence.coerceIn(0f, 1f),
             direction = input.direction,
             crosswalkDetected = input.crosswalkDetected,
-            shouldAnnounce = shouldAnnounceRequest(
-                previous = previous,
-                request = request
-            )
+            shouldAnnounce = false
         )
     }
 

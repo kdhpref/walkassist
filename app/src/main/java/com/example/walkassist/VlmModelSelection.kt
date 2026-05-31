@@ -9,32 +9,14 @@ import java.net.URL
 enum class VlmModelOption(
     val preferenceValue: String,
     val displayName: String,
-    val florenceVariant: Florence2OnnxVariant?,
 ) {
     GEMINI_API(
         preferenceValue = "gemini_api",
         displayName = "Gemini API",
-        florenceVariant = null,
-    ),
-    GEMINI_2_5_FLASH_LIVE_API(
-        preferenceValue = "gemini_2_5_flash_live_api",
-        displayName = "Gemini 2.5 Flash Live",
-        florenceVariant = null,
-    ),
-    FLORENCE2_INT4(
-        preferenceValue = "florence2_int4",
-        displayName = "Florence-2 INT4",
-        florenceVariant = Florence2OnnxVariant.INT4,
-    ),
-    FLORENCE2_INT8(
-        preferenceValue = "florence2_int8",
-        displayName = "Florence-2 INT8",
-        florenceVariant = Florence2OnnxVariant.INT8,
     );
 
     companion object {
         fun fromPreferenceValue(value: String): VlmModelOption {
-            if (value == "gemini_3_1_flash_live_api") return GEMINI_2_5_FLASH_LIVE_API
             return values().firstOrNull { it.preferenceValue == value } ?: GEMINI_API
         }
     }

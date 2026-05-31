@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.ViewGroup
@@ -66,6 +67,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.walkassist.feedback.core.FeedbackUiState
 import com.example.walkassist.feedback.core.FeedbackAlertLevel
+import com.example.walkassist.feedback.core.FeedbackOutputMode
 import com.example.walkassist.feedback.core.FeedbackSensorStatus
 import com.example.walkassist.feedback.engine.ArFeedbackMapper
 import com.example.walkassist.feedback.engine.FeedbackViewModel
@@ -85,7 +87,10 @@ class MainActivity : AppCompatActivity() {
     private val arFeedbackMapper = ArFeedbackMapper()
     private lateinit var feedbackManager: FeedbackManager
     private var arFragment: WalkAssistArFragment? = null
-    private var liveVlmActive by mutableStateOf(false)
+    private var lowDistanceConfidenceStartedAtMs = 0L
+    private var lastLowDistanceConfidenceAnnouncementAtMs = 0L
+    private var awaitingDistanceConfidenceRecoveryAnnouncement = false
+    private var lastHeuristicObstaclePulseAtMs = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -146,8 +151,6 @@ class MainActivity : AppCompatActivity() {
                         feedbackState = feedbackState,
                         onOcrClick = ::requestOneShotOcr,
                         onVlmClick = ::requestOneShotVlm,
-                        onLiveGuideClick = ::requestLiveVlmGuidance,
-                        vlmButtonText = liveVlmButtonText(),
                         onStopReplayRecording = ::stopArCoreReplayRecording,
                         onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
                         onDebugVisualizationChanged = ::setDebugVisualizationVisible,
@@ -184,15 +187,6 @@ class MainActivity : AppCompatActivity() {
                 level = FeedbackAlertLevel.CAUTION,
                 prioritySpeech = true,
             )
-        }
-        fragment.onLiveVlmGuidanceResult = { message ->
-            feedbackManager.speakQueued(
-                message = message,
-                level = FeedbackAlertLevel.CAUTION,
-            )
-        }
-        fragment.onLiveVlmStateChanged = { active ->
-            liveVlmActive = active
         }
     }
 
@@ -304,35 +298,6 @@ class MainActivity : AppCompatActivity() {
         fragment.requestOneShotVlm()
     }
 
-    private fun requestLiveVlmGuidance() {
-        feedbackManager.stopSpeech()
-        if (!WalkAssistSettings.debugPipelineFlags(this).vlmEnabled) {
-            feedbackManager.provideFeedback(
-                message = "디버그 설정에서 VLM 파이프라인이 꺼져 있습니다.",
-                level = FeedbackAlertLevel.CAUTION,
-            )
-            return
-        }
-        val fragment = arFragment
-            ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
-                ?.also(::configureArFragment)
-
-        if (fragment == null) {
-            feedbackManager.provideFeedback(
-                message = "Live 안내를 준비 중입니다. 잠시 후 다시 눌러 주세요.",
-                level = FeedbackAlertLevel.CAUTION,
-            )
-            return
-        }
-
-        fragment.requestLiveVlmGuidance()
-    }
-
-    private fun liveVlmButtonText(): String {
-        val isLiveModel = WalkAssistSettings.vlmModelOption(this) == VlmModelOption.GEMINI_2_5_FLASH_LIVE_API
-        return if (isLiveModel && liveVlmActive) "VLM 종료" else "VLM 시작"
-    }
-
     private fun stopArCoreReplayRecording() {
         val fragment = arFragment
             ?: (supportFragmentManager.findFragmentById(fragmentContainerId) as? WalkAssistArFragment)
@@ -360,6 +325,8 @@ class MainActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
                     ArMeasurementBridge.state.collect { state ->
+                        maybeAnnounceLowDistanceConfidence(state)
+                        maybePulseHeuristicObstacle(state)
                         feedbackViewModel.onInput(arFeedbackMapper.map(state))
                     }
                 }
@@ -378,6 +345,104 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun maybeAnnounceLowDistanceConfidence(state: ArMeasurementState) {
+        val now = SystemClock.elapsedRealtime()
+        if (!shouldMonitorDistanceConfidence(state)) {
+            lowDistanceConfidenceStartedAtMs = 0L
+            awaitingDistanceConfidenceRecoveryAnnouncement = false
+            return
+        }
+
+        if (!state.hasLowDistanceConfidence()) {
+            lowDistanceConfidenceStartedAtMs = 0L
+            maybeAnnounceDistanceConfidenceRecovered()
+            return
+        }
+
+        if (lowDistanceConfidenceStartedAtMs == 0L) {
+            lowDistanceConfidenceStartedAtMs = now
+            return
+        }
+
+        val lowConfidenceDurationMs = now - lowDistanceConfidenceStartedAtMs
+        val elapsedSinceLastAnnouncementMs = now - lastLowDistanceConfidenceAnnouncementAtMs
+        if (
+            lowConfidenceDurationMs < LOW_DISTANCE_CONFIDENCE_PERSISTENCE_MS ||
+            elapsedSinceLastAnnouncementMs < LOW_DISTANCE_CONFIDENCE_ANNOUNCE_COOLDOWN_MS ||
+            !WalkAssistSettings.isArcoreTtsEnabled(this)
+        ) {
+            return
+        }
+
+        feedbackManager.provideFeedback(
+            message = LOW_DISTANCE_CONFIDENCE_MESSAGE,
+            level = FeedbackAlertLevel.CAUTION,
+            outputMode = FeedbackOutputMode(
+                useSpeech = true,
+                useHaptic = false,
+            ),
+        )
+        lastLowDistanceConfidenceAnnouncementAtMs = now
+        awaitingDistanceConfidenceRecoveryAnnouncement = true
+    }
+
+    private fun maybeAnnounceDistanceConfidenceRecovered() {
+        if (!awaitingDistanceConfidenceRecoveryAnnouncement) return
+
+        awaitingDistanceConfidenceRecoveryAnnouncement = false
+        if (!WalkAssistSettings.isArcoreTtsEnabled(this)) return
+
+        feedbackManager.provideFeedback(
+            message = DISTANCE_CONFIDENCE_RECOVERED_MESSAGE,
+            level = FeedbackAlertLevel.SAFE,
+            outputMode = FeedbackOutputMode(
+                useSpeech = true,
+                useHaptic = false,
+            ),
+        )
+    }
+
+    private fun maybePulseHeuristicObstacle(state: ArMeasurementState) {
+        val obstacleDistance = state.heuristicObstacleDistanceMeters ?: return
+        if (state.trackingLabel != "tracking" || state.sensingConfidenceScore < LOW_DISTANCE_CONFIDENCE_SCORE_THRESHOLD) {
+            return
+        }
+
+        val urgent = obstacleDistance <= HEURISTIC_URGENT_OBSTACLE_METERS
+        val watch = obstacleDistance <= HEURISTIC_WATCH_OBSTACLE_METERS
+        if (!urgent && !watch) return
+
+        val now = SystemClock.elapsedRealtime()
+        val intervalMs = if (urgent) {
+            HEURISTIC_URGENT_PULSE_INTERVAL_MS
+        } else {
+            HEURISTIC_WATCH_PULSE_INTERVAL_MS
+        }
+        if (now - lastHeuristicObstaclePulseAtMs < intervalMs) return
+
+        feedbackManager.playObstaclePulse(urgent = urgent)
+        lastHeuristicObstaclePulseAtMs = now
+    }
+
+    private fun shouldMonitorDistanceConfidence(state: ArMeasurementState): Boolean {
+        return state.trackingLabel !in setOf(
+            "permission",
+            "unavailable",
+            "video_replay",
+        )
+    }
+
+    private fun ArMeasurementState.hasLowDistanceConfidence(): Boolean {
+        val noMeasuredDistance = collisionDistanceMeters == null &&
+            centerDistanceMeters == null &&
+            depthDistanceMeters == null &&
+            floorDistanceMeters == null
+        val noFloorPlane = horizontalPlaneCount <= 0 && floorDistanceMeters == null
+        return trackingLabel != "tracking" ||
+            sensingConfidenceScore < LOW_DISTANCE_CONFIDENCE_SCORE_THRESHOLD ||
+            (noMeasuredDistance && noFloorPlane)
     }
 
     override fun onDestroy() {
@@ -495,6 +560,16 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "WalkAssistMain"
         private const val REQUEST_STARTUP_PERMISSIONS = 100
         private const val REQUEST_GEOSPATIAL_LOCATION_PERMISSION = 101
+        private const val LOW_DISTANCE_CONFIDENCE_SCORE_THRESHOLD = 55
+        private const val LOW_DISTANCE_CONFIDENCE_PERSISTENCE_MS = 3_500L
+        private const val LOW_DISTANCE_CONFIDENCE_ANNOUNCE_COOLDOWN_MS = 20_000L
+        private const val LOW_DISTANCE_CONFIDENCE_MESSAGE =
+            "거리 신뢰도값이 낮음. 바닥과 주변 경계를 인식할 수 있도록 천천히 카메라를 움직여주세요."
+        private const val DISTANCE_CONFIDENCE_RECOVERED_MESSAGE = "거리측정 활성화"
+        private const val HEURISTIC_WATCH_OBSTACLE_METERS = 3.0f
+        private const val HEURISTIC_URGENT_OBSTACLE_METERS = 1.3f
+        private const val HEURISTIC_WATCH_PULSE_INTERVAL_MS = 2_000L
+        private const val HEURISTIC_URGENT_PULSE_INTERVAL_MS = 1_000L
     }
 }
 
@@ -504,8 +579,6 @@ private fun WalkAssistRootOverlay(
     feedbackState: FeedbackUiState,
     onOcrClick: () -> Unit,
     onVlmClick: () -> Unit,
-    onLiveGuideClick: () -> Unit,
-    vlmButtonText: String,
     onStopReplayRecording: () -> Unit,
     onPlaneMeshDebugChanged: (Boolean) -> Unit,
     onDebugVisualizationChanged: (Boolean) -> Unit,
@@ -542,6 +615,12 @@ private fun WalkAssistRootOverlay(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .clickable(onClick = onVlmClick),
+        )
+
         if (cameraUiVisible) {
             MeasurementOverlay(
                 state = state,
@@ -595,20 +674,6 @@ private fun WalkAssistRootOverlay(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 18.dp),
-        )
-        GuideActionChip(
-            text = vlmButtonText,
-            onClick = onVlmClick,
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 14.dp, bottom = 18.dp),
-        )
-        GuideActionChip(
-            text = "안내",
-            onClick = onLiveGuideClick,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 14.dp, bottom = 18.dp),
         )
     }
 }
@@ -906,7 +971,9 @@ private fun MeasurementOverlay(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+    ) {
         if (debugVisible) {
             ObjectDetectionOverlay(
                 detections = state.objectDetections,
@@ -1291,6 +1358,19 @@ private fun walkingZoneSampleColor(distanceMeters: Float?): Color {
     }
 }
 
+private fun isDepthProfilePitchUsable(pitchDownDegrees: Float): Boolean {
+    return pitchDownDegrees in 18f..78f
+}
+
+private fun depthProfilePitchLabel(pitchDownDegrees: Float): String {
+    return when {
+        pitchDownDegrees < 18f -> "low"
+        pitchDownDegrees > 78f -> "steep"
+        pitchDownDegrees < 30f -> "soft"
+        else -> "on"
+    }
+}
+
 @Composable
 private fun DebugOverlay(
     state: ArMeasurementState,
@@ -1357,13 +1437,17 @@ private fun DebugOverlay(
         Spacer(modifier = Modifier.height(6.dp))
         DirectionArrow(state = state)
         Spacer(modifier = Modifier.height(4.dp))
-        Text("Tracking: ${state.trackingLabel}", color = Color(0xFFD9E2EA))
         if (state.trackingFailureLabel.isNotBlank()) {
             Text("Tracking issue: ${state.trackingFailureLabel}", color = Color(0xFFFFE08B))
         }
+        val geospatialActiveLabel = if (debugFlags.geospatialEnabled) "ON" else "OFF"
         Text(
-            "Geo: ${state.geospatialStatusLabel} ${state.geospatialEarthStateLabel}".trim(),
-            color = if (state.geospatialStatusLabel == "enabled") Color(0xFFB6E7FF) else Color(0xFFD9E2EA),
+            "Geo flag $geospatialActiveLabel / ${state.geospatialStatusLabel} ${state.geospatialEarthStateLabel}".trim(),
+            color = if (debugFlags.geospatialEnabled && state.geospatialStatusLabel == "enabled") {
+                Color(0xFFB6E7FF)
+            } else {
+                Color(0xFFD9E2EA)
+            },
         )
         if (debugFlags.geospatialEnabled) {
             Text("Streetscape: ${state.geospatialStreetscapeGeometryCount}", color = Color(0xFFD9E2EA))
@@ -1372,7 +1456,10 @@ private fun DebugOverlay(
             Text("Route: ${state.routeRealityGuidanceAction}/${state.routeRealityGuidanceSource}", color = Color(0xFFB6E7FF))
             Text(state.routeRealityGuidanceDetail, color = Color(0xFFD9E2EA))
         }
-        Text("Pitch ${state.pitchDownDegrees.toInt()}deg", color = Color(0xFFD9E2EA))
+        Text(
+            "Pitch ${state.pitchDownDegrees.toInt()}deg / profile ${depthProfilePitchLabel(state.pitchDownDegrees)}",
+            color = if (isDepthProfilePitchUsable(state.pitchDownDegrees)) Color(0xFFB7F7CE) else Color(0xFFFFDB7A),
+        )
         Text(
             state.guidanceLabel,
             color = when (state.statusLevel) {

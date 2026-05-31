@@ -72,7 +72,14 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val wall: Float?,
         val depth: Float?,
         val rawDepth: Float?,
+        val heuristicObstacle: Float?,
         val collision: Float?,
+    )
+
+    private data class CorridorDepthProfile(
+        val obstacleDistanceMeters: Float?,
+        val openDistanceMeters: Float?,
+        val confidence: Float,
     )
 
     private data class RawDepthCorridorResult(
@@ -226,8 +233,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var stableDirection = "searching"
     var onOneShotOcrResult: ((String) -> Unit)? = null
     var onOneShotVlmResult: ((String) -> Unit)? = null
-    var onLiveVlmGuidanceResult: ((String) -> Unit)? = null
-    var onLiveVlmStateChanged: ((Boolean) -> Unit)? = null
     var recordReplayOnSessionStart: Boolean = false
     var playbackDatasetUri: Uri? = null
     private var activeRecordingDatasetUri: Uri? = null
@@ -245,8 +250,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var frameArgbPixels = IntArray(0)
     @Volatile
     private var oneShotVlmRequestedAtMs: Long = 0L
-    private val liveVlmSessionActive = AtomicBoolean(false)
-    private var lastLiveVlmFrameSentAtMs = 0L
 
     fun requestOneShotOcr() {
         if (oneShotOcrRequested.get() || oneShotOcrInFlight.get()) {
@@ -257,84 +260,13 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     }
 
     fun requestOneShotVlm() {
-        Log.d(TAG, "VLM button requested")
-        if (WalkAssistSettings.vlmModelOption(requireContext().applicationContext) ==
-            VlmModelOption.GEMINI_2_5_FLASH_LIVE_API
-        ) {
-            toggleGeminiLiveSession()
-            return
-        }
+        Log.d(TAG, "VLM guidance requested")
         if (oneShotVlmRequested.get() || oneShotVlmInFlight.get()) {
             dispatchOneShotVlmResult("이미 전방 화면을 분석 중입니다. 잠시만 기다려 주세요.")
             return
         }
         oneShotVlmRequestedAtMs = SystemClock.elapsedRealtime()
         oneShotVlmRequested.set(true)
-    }
-
-    fun requestLiveVlmGuidance() {
-        if (WalkAssistSettings.vlmModelOption(requireContext().applicationContext) !=
-            VlmModelOption.GEMINI_2_5_FLASH_LIVE_API
-        ) {
-            dispatchOneShotVlmResult("Gemini 2.5 Live 모델을 선택해야 사용할 수 있습니다.")
-            return
-        }
-        if (!liveVlmSessionActive.get()) {
-            dispatchOneShotVlmResult("먼저 VLM 시작을 눌러 Live 영상 스트림을 켜 주세요.")
-            return
-        }
-        if (!vlmSceneInterpreter.requestLiveGuidance()) {
-            dispatchOneShotVlmResult("Live 영상 응답을 기다리는 중입니다. 잠시 후 다시 눌러 주세요.")
-        }
-    }
-
-    private fun toggleGeminiLiveSession() {
-        if (liveVlmSessionActive.get()) {
-            vlmSceneInterpreter.stopLiveSession()
-            liveVlmSessionActive.set(false)
-            onLiveVlmStateChanged?.invoke(false)
-            dispatchOneShotVlmResult("Gemini 2.5 Live 세션을 종료했습니다.")
-            return
-        }
-
-        val started = vlmSceneInterpreter.startLiveSession(
-            onText = { message ->
-                if (message.isNotBlank()) {
-                    dispatchLiveVlmGuidanceResult(message)
-                }
-            },
-            onError = { message ->
-                liveVlmSessionActive.set(false)
-                onLiveVlmStateChanged?.invoke(false)
-                dispatchOneShotVlmResult("Gemini 2.5 Live 세션 오류. $message")
-            },
-            onTiming = { event ->
-                val appContext = requireContext().applicationContext
-                VlmInvocationLogger.appendLive(
-                    context = appContext,
-                    selectedModelName = WalkAssistSettings.vlmModelOption(appContext).displayName,
-                    eventName = event.eventName,
-                    elapsedMs = event.elapsedMs,
-                    audioBytes = event.audioBytes,
-                    transcriptChars = event.transcriptChars,
-                    success = event.errorMessage == null,
-                    errorMessage = event.errorMessage,
-                )
-                Log.d(
-                    TAG,
-                    "Gemini Live timing event=${event.eventName} elapsedMs=${event.elapsedMs} " +
-                        "audioBytes=${event.audioBytes} transcriptChars=${event.transcriptChars}",
-                )
-            },
-        )
-        if (started) {
-            liveVlmSessionActive.set(true)
-            lastLiveVlmFrameSentAtMs = 0L
-            onLiveVlmStateChanged?.invoke(true)
-            dispatchOneShotVlmResult("Gemini 2.5 Live 세션을 시작합니다.")
-        } else {
-            dispatchOneShotVlmResult("Gemini 2.5 Live 세션을 사용할 수 없습니다.")
-        }
     }
 
     fun setPlaneMeshDebugVisible(visible: Boolean) {
@@ -469,11 +401,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     }
 
     override fun onPause() {
-        if (liveVlmSessionActive.get()) {
-            vlmSceneInterpreter.stopLiveSession()
-            liveVlmSessionActive.set(false)
-            onLiveVlmStateChanged?.invoke(false)
-        }
         arSession?.pause()
         glSurfaceView?.onPause()
         super.onPause()
@@ -640,7 +567,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         }
         detectorExecutor.shutdownNow()
         vlmExecutor.shutdownNow()
-        liveVlmSessionActive.set(false)
         vlmSceneInterpreter.close()
         oneShotOcrReader?.close()
         arSession?.close()
@@ -1216,14 +1142,19 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             .firstOrNull()
         val nearestBlockingObjectDetection = nearestBlockingObjectDetection(overlayDetections)
 
-        val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left")
-        val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center")
-        val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right")
+        val leftLane = corridorLaneDistances(corridorHits, rawDepthHits, "left", pitchDownDegrees)
+        val centerLane = corridorLaneDistances(corridorHits, rawDepthHits, "center", pitchDownDegrees)
+        val rightLane = corridorLaneDistances(corridorHits, rawDepthHits, "right", pitchDownDegrees)
 
         val floorDistance = listOfNotNull(leftLane.floor, centerLane.floor, rightLane.floor).minOrNull()
         val wallDistance = listOfNotNull(leftLane.wall, centerLane.wall, rightLane.wall).minOrNull()
         val depthDistance = listOfNotNull(leftLane.depth, centerLane.depth, rightLane.depth).minOrNull()
         val rawDepthDistance = listOfNotNull(leftLane.rawDepth, centerLane.rawDepth, rightLane.rawDepth).minOrNull()
+        val heuristicObstacleDistance = listOfNotNull(
+            leftLane.heuristicObstacle,
+            centerLane.heuristicObstacle,
+            rightLane.heuristicObstacle,
+        ).minOrNull()
         val rawCollisionDistance = listOfNotNull(
             leftLane.collision,
             centerLane.collision,
@@ -1397,6 +1328,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 wallDistanceMeters = smoothedWall,
                 depthDistanceMeters = smoothedDepth,
                 rawDepthDistanceMeters = smoothedRawDepth,
+                heuristicObstacleDistanceMeters = heuristicObstacleDistance,
                 collisionDistanceMeters = collisionDistance,
                 approachSpeedMetersPerSecond = approachSpeed,
                 motionMetersPerSecond = motionSpeed,
@@ -1470,16 +1402,13 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
         val ocrRequested = oneShotOcrRequested.get()
         val vlmRequested = oneShotVlmRequested.get()
-        val liveVlmStreaming = liveVlmSessionActive.get() && debugFlags.vlmEnabled
         val backgroundVisionEnabled = debugFlags.yoloEnabled
-        if (!backgroundVisionEnabled && !ocrRequested && !vlmRequested && !liveVlmStreaming) {
+        if (!backgroundVisionEnabled && !ocrRequested && !vlmRequested) {
             lastObjectDetections = emptyList()
             return
         }
         val now = SystemClock.elapsedRealtime()
-        val liveFrameDue = liveVlmStreaming && now - lastLiveVlmFrameSentAtMs >= LIVE_VLM_FRAME_INTERVAL_MS
-        if (!ocrRequested && !vlmRequested && !liveFrameDue && now - lastDetectionStartedAtMs < 450L) return
-        if (!ocrRequested && !vlmRequested && liveVlmStreaming && !liveFrameDue && !backgroundVisionEnabled) return
+        if (!ocrRequested && !vlmRequested && now - lastDetectionStartedAtMs < 450L) return
 
         val image = try {
             frame.acquireCameraImage()
@@ -1500,14 +1429,10 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             var ocrStarted = false
             var shouldRunVlm = false
             var vlmStarted = false
-            var shouldStreamLiveVlm = false
             var bitmap: Bitmap? = null
             try {
                 shouldRunOcr = oneShotOcrRequested.getAndSet(false)
                 shouldRunVlm = oneShotVlmRequested.getAndSet(false)
-                shouldStreamLiveVlm = liveVlmSessionActive.get() &&
-                    debugFlags.vlmEnabled &&
-                    SystemClock.elapsedRealtime() - lastLiveVlmFrameSentAtMs >= LIVE_VLM_FRAME_INTERVAL_MS
                 if (shouldRunVlm && !debugFlags.vlmEnabled) {
                     appendVlmInvocationLog(
                         success = false,
@@ -1519,8 +1444,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 }
                 if (!backgroundVisionEnabled &&
                     !shouldRunOcr &&
-                    !(shouldRunVlm && debugFlags.vlmEnabled) &&
-                    !shouldStreamLiveVlm
+                    !(shouldRunVlm && debugFlags.vlmEnabled)
                 ) {
                     image.close()
                     return@execute
@@ -1529,8 +1453,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 if (
                     backgroundVisionEnabled &&
                     !shouldRunOcr &&
-                    !(shouldRunVlm && debugFlags.vlmEnabled) &&
-                    !shouldStreamLiveVlm
+                    !(shouldRunVlm && debugFlags.vlmEnabled)
                 ) {
                     val detectedObjects = if (objectAnalyzer.isReady()) {
                         objectAnalyzer.detect(
@@ -1619,7 +1542,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     maxLongSide = analysisInputMaxLongSide(
                         shouldRunOcr = shouldRunOcr,
                         shouldRunManualVlm = shouldRunVlm && debugFlags.vlmEnabled,
-                        shouldStreamLiveVlm = shouldStreamLiveVlm,
                         backgroundVisionEnabled = backgroundVisionEnabled,
                     ),
                 ).also { bitmap = it }
@@ -1690,10 +1612,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     arState = arStateSnapshot,
                     requestMode = if (shouldRunVlm) VlmRequestMode.MANUAL else VlmRequestMode.AUTO,
                 )
-                if (shouldStreamLiveVlm) {
-                    vlmSceneInterpreter.streamLiveFrame(spatialFrame)
-                    lastLiveVlmFrameSentAtMs = SystemClock.elapsedRealtime()
-                }
                 if (shouldRunVlm && debugFlags.vlmEnabled && !vlmStarted) {
                     startBackgroundVlmCaption(
                         bitmap = analysisBitmap,
@@ -1764,13 +1682,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private fun analysisInputMaxLongSide(
         shouldRunOcr: Boolean,
         shouldRunManualVlm: Boolean,
-        shouldStreamLiveVlm: Boolean,
         backgroundVisionEnabled: Boolean,
     ): Int? {
         return when {
             shouldRunOcr -> null
             shouldRunManualVlm -> VLM_ANALYSIS_MAX_LONG_SIDE
-            shouldStreamLiveVlm -> LIVE_VLM_ANALYSIS_MAX_LONG_SIDE
             backgroundVisionEnabled -> YOLO_ANALYSIS_MAX_LONG_SIDE
             else -> YOLO_ANALYSIS_MAX_LONG_SIDE
         }
@@ -1921,12 +1837,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         }
     }
 
-    private fun dispatchLiveVlmGuidanceResult(message: String) {
-        activity?.runOnUiThread {
-            onLiveVlmGuidanceResult?.invoke(message)
-        }
-    }
-
     private fun displayRotationDegrees(): Int {
         val rotation = displayRotation()
         return when (rotation) {
@@ -1979,10 +1889,16 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         hits: List<CorridorHit>,
         rawDepthHits: List<CorridorHit>,
         lane: String,
+        pitchDownDegrees: Float,
     ): LaneDistances {
         val filtered = hits.filter { classifyLane(it.lateralMeters) == lane }
         val obstacleHits = filtered.filter { it.source != HitSource.FLOOR }
         val rawDepth = robustLaneRawDepthDistance(rawDepthHits, lane)
+        val depthProfile = analyzeLaneDepthProfile(
+            rawDepthHits = rawDepthHits,
+            lane = lane,
+            pitchDownDegrees = pitchDownDegrees,
+        )
         val floor = filtered.filter { it.source == HitSource.FLOOR }.minOfOrNull { it.distanceMeters }
         val wall = obstacleHits.filter { it.source == HitSource.WALL }.minOfOrNull { it.distanceMeters }
         val depth = obstacleHits.filter { it.source == HitSource.DEPTH }.minOfOrNull { it.distanceMeters }
@@ -1991,8 +1907,75 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             wall = wall,
             depth = depth,
             rawDepth = rawDepth,
-            collision = listOfNotNull(wall, depth, rawDepth).minOrNull(),
+            heuristicObstacle = depthProfile.obstacleDistanceMeters,
+            collision = listOfNotNull(wall, depthProfile.obstacleDistanceMeters).minOrNull(),
         )
+    }
+
+    private fun analyzeLaneDepthProfile(
+        rawDepthHits: List<CorridorHit>,
+        lane: String,
+        pitchDownDegrees: Float,
+    ): CorridorDepthProfile {
+        if (pitchDownDegrees !in RAW_DEPTH_PROFILE_MIN_PITCH_DEGREES..RAW_DEPTH_PROFILE_MAX_PITCH_DEGREES) {
+            return CorridorDepthProfile(null, null, 0f)
+        }
+
+        val laneHits = rawDepthHits
+            .filter { classifyLane(it.lateralMeters) == lane }
+            .filter { it.observationConfidence >= RAW_DEPTH_PROFILE_MIN_CONFIDENCE }
+        if (laneHits.size < RAW_DEPTH_PROFILE_MIN_SAMPLES) {
+            return CorridorDepthProfile(null, null, 0f)
+        }
+
+        val rowDistances = laneHits
+            .groupBy { it.viewYRatio }
+            .mapNotNull { (viewYRatio, hits) ->
+                if (hits.size < RAW_DEPTH_PROFILE_MIN_ROW_SAMPLES) return@mapNotNull null
+                viewYRatio to medianDistance(hits.map { it.distanceMeters })
+            }
+            .sortedByDescending { (viewYRatio, _) -> viewYRatio }
+
+        if (rowDistances.size < RAW_DEPTH_PROFILE_MIN_ROWS) {
+            return CorridorDepthProfile(null, null, 0f)
+        }
+
+        var expectedFloorDistance = rowDistances.first().second
+        var farthestOpenDistance = expectedFloorDistance
+        var obstacleDistance: Float? = null
+
+        for ((_, distance) in rowDistances.drop(1)) {
+            val pitchAllowance = if (pitchDownDegrees < RAW_DEPTH_PROFILE_STABLE_PITCH_DEGREES) {
+                RAW_DEPTH_PROFILE_LOW_PITCH_EXTRA_ALLOWANCE_METERS
+            } else {
+                0f
+            }
+            val allowedDecrease = maxOf(
+                RAW_DEPTH_PROFILE_MIN_DECREASE_METERS,
+                expectedFloorDistance * RAW_DEPTH_PROFILE_DECREASE_RATIO,
+            ) + pitchAllowance
+            if (distance + allowedDecrease < expectedFloorDistance) {
+                obstacleDistance = distance
+                break
+            }
+
+            expectedFloorDistance = maxOf(expectedFloorDistance, distance)
+            farthestOpenDistance = maxOf(farthestOpenDistance, distance)
+        }
+
+        val confidence = (laneHits.map { it.observationConfidence }.average().toFloat() *
+            (rowDistances.size / RAW_DEPTH_PROFILE_EXPECTED_ROWS.toFloat()).coerceIn(0f, 1f))
+            .coerceIn(0f, 1f)
+        return CorridorDepthProfile(
+            obstacleDistanceMeters = obstacleDistance,
+            openDistanceMeters = farthestOpenDistance,
+            confidence = confidence,
+        )
+    }
+
+    private fun medianDistance(distances: List<Float>): Float {
+        val sorted = distances.sorted()
+        return sorted[sorted.size / 2]
     }
 
     private fun robustLaneRawDepthDistance(
@@ -3225,7 +3208,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val forwardY = -zAxis[1]
         val forwardZ = -zAxis[2]
         val horizontal = sqrt((forwardX * forwardX) + (forwardZ * forwardZ))
-        return Math.toDegrees(atan2(forwardY.toDouble(), horizontal.toDouble())).toFloat().coerceIn(0f, 85f)
+        return Math.toDegrees(atan2((-forwardY).toDouble(), horizontal.toDouble())).toFloat().coerceIn(0f, 90f)
     }
 
     private fun computeMotionSpeed(frame: Frame): Float? {
@@ -3436,10 +3419,8 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
     companion object {
         private const val TAG = "WalkAssistVlm"
-        private const val LIVE_VLM_FRAME_INTERVAL_MS = 500L
         private const val YOLO_ANALYSIS_MAX_LONG_SIDE = 640
         private const val VLM_ANALYSIS_MAX_LONG_SIDE = 768
-        private const val LIVE_VLM_ANALYSIS_MAX_LONG_SIDE = 384
         private const val DEPTH_MEASUREMENT_LOG_INTERVAL_MS = 1_000L
         private const val GEOSPATIAL_RECONFIGURE_RETRY_MS = 2_000L
         private const val CROSSWALK_PATTERN_STALE_NANOS = 1_500_000_000L
@@ -3448,6 +3429,17 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         private const val CROSSWALK_HEADING_PRIOR_DEGREES = 100.0
         private const val RAW_DEPTH_VISUALIZATION_MAX_MM = 10_000
         private const val GEOSPATIAL_DEPTH_VISUALIZATION_MAX_MM = 65_000
+        private const val RAW_DEPTH_PROFILE_MIN_CONFIDENCE = 0.32f
+        private const val RAW_DEPTH_PROFILE_MIN_SAMPLES = 6
+        private const val RAW_DEPTH_PROFILE_MIN_ROW_SAMPLES = 1
+        private const val RAW_DEPTH_PROFILE_MIN_ROWS = 3
+        private const val RAW_DEPTH_PROFILE_EXPECTED_ROWS = 5
+        private const val RAW_DEPTH_PROFILE_MIN_PITCH_DEGREES = 18f
+        private const val RAW_DEPTH_PROFILE_STABLE_PITCH_DEGREES = 30f
+        private const val RAW_DEPTH_PROFILE_MAX_PITCH_DEGREES = 78f
+        private const val RAW_DEPTH_PROFILE_MIN_DECREASE_METERS = 0.35f
+        private const val RAW_DEPTH_PROFILE_DECREASE_RATIO = 0.18f
+        private const val RAW_DEPTH_PROFILE_LOW_PITCH_EXTRA_ALLOWANCE_METERS = 0.2f
         private val EMPTY_FRAME_ANALYSIS = FrameAnalysis(
             detections = emptyList(),
             nearestObstacle = null,
