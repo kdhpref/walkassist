@@ -2,6 +2,7 @@ package com.example.walkassist.feedback.runtime
 
 import com.example.walkassist.feedback.core.FeedbackRequest
 import com.example.walkassist.feedback.core.FeedbackThresholds
+import com.example.walkassist.feedback.core.FeedbackSource      // 코드 추가
 import java.util.PriorityQueue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -11,18 +12,13 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * 전역 안내 우선순위 큐.
+ * 일반 안내용 전역 피드백 우선순위 큐.
  *
- * FeedbackPolicy가 만든 FeedbackRequest를 받아서
- * 우선순위 / 반복 제한 / 중복 제거 / 실행 순서를 관리합니다.
+ * 이 큐는 TTS, 진동, TalkBack, 화면 안내처럼
+ * 사용자에게 전달되는 일반 피드백만 처리합니다.
  *
- * 실제 TTS, 진동, 접근성 안내 실행은 FeedbackManager에게 맡깁니다.
- *
- * 빌드 안정화 기준:
- * - FeedbackRequest 타입을 정상 import해서 사용합니다.
- * - `FeedbackRequest.kt` 같은 파일명을 타입처럼 쓰지 않습니다.
- * - FeedbackSource enum을 when으로 직접 분기하지 않아 SENSOR_STATUS 추가 여부와 무관하게 빌드되게 합니다.
- * - request.throttleMillis가 0이면 FeedbackThresholds 기본값을 사용합니다.
+ * 긴급 SOS, 전화, 문자, 위치 공유, 비상 연락처 처리는
+ * 이 큐에 넣지 않고 sos/ 패키지의 별도 매니저에서 처리해야 합니다.
  */
 class FeedbackQueue(
     private val manager: FeedbackManager,
@@ -42,7 +38,7 @@ class FeedbackQueue(
     private val mutex = Mutex()
 
     /**
-     * throttleKey별 마지막 실행 또는 등록 시각입니다.
+     * throttleKey별 마지막 실제 실행 시각입니다.
      */
     private val lastAnnouncementMillisByKey = mutableMapOf<String, Long>()
 
@@ -92,16 +88,24 @@ class FeedbackQueue(
 
                 // 숫자가 작을수록 높은 우선순위입니다.
                 // interruptCurrent가 true인 요청만 현재 안내를 중단할 수 있습니다.
-                if (current != null &&
+                if (current != null &&          // 여기부터
                     request.interruptCurrent &&
-                    request.priority < current.priority
+                    (
+                            request.priority < current.priority ||
+                                    (
+                                            request.priority == current.priority &&
+                                                    request.source == FeedbackSource.AR_OBSTACLE &&
+                                                    current.source != FeedbackSource.AR_OBSTACLE
+                                            )
+                            )
                 ) {
                     processingJob?.cancel()
+                    manager.stop()
                     currentRequest = null
                     queue.add(request)
                     processNextLocked()
                     return@withLock
-                }
+                }       // 여기서까지 코드 수정
 
                 queue.add(request)
 
@@ -161,7 +165,7 @@ class FeedbackQueue(
         val key = request.throttleKey
         if (key.isBlank()) return false
 
-        val lastMillis = lastAnnouncementMillisByKey[key] ?: return false
+        val lastMillis: Long = lastAnnouncementMillisByKey[key] ?: return false
 
         val throttleMillis = effectiveThrottleMillis(request)
         if (throttleMillis <= 0L) return false

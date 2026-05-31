@@ -41,7 +41,7 @@ data class FeedbackRequest(
     /**
      * 숫자가 작을수록 높은 우선순위입니다.
      */
-    override fun compareTo(other: FeedbackRequest): Int {
+    override operator fun compareTo(other: FeedbackRequest): Int {
         return priority.compareTo(other.priority)
     }
 }

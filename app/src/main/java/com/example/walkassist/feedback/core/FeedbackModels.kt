@@ -41,6 +41,7 @@ enum class FeedbackSensorStatus {
  */
 enum class FeedbackSensorType {
     ARCORE,
+    VIDEO_REPLAY,
     UNKNOWN
 }
 

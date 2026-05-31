@@ -2,6 +2,23 @@ package com.example.walkassist.feedback.core
 
 import java.util.Locale
 
+/*
+ * ============================================================
+ * 작업자 C(여준호) 수정 안내 - 영어 모드 표시 문구 처리 기준
+ * ============================================================
+ * 이 파일의 FeedbackRequest.message는 기존 앱 흐름과 TTS 호환성을 위해
+ * 기본 한국어 문구를 유지합니다.
+ *
+ * 영어 모드에서 화면에 보이는 한국어 문구는 MainActivity.kt의
+ * translateFeedbackMessage(...)와 FeedbackOverlay.kt의 languageCode 분기에서
+ * 표시용으로 영어 변환합니다.
+ *
+ * 이렇게 분리한 이유:
+ * - FeedbackPolicy의 거리/우선순위/진동/TTS 정책은 건드리지 않음
+ * - MainActivity.kt 공통 파일의 UI 표시 단계에서만 언어를 바꿈
+ * - 다른 작업자 A/B 코드와 충돌 가능성을 줄임
+ */
+
 /**
  * 거리 기준값
  *
@@ -49,6 +66,8 @@ object FeedbackThresholds {
     const val NAVIGATION_THROTTLE_MS = 2_500L
     const val OCR_THROTTLE_MS = 1_000L
     const val SENSOR_STATUS_THROTTLE_MS = 5_000L
+
+    const val OCR_MAX_SPEECH_CHARS = 100
 }
 
 /**
@@ -206,9 +225,7 @@ class FeedbackPolicy {
     fun ocrRequest(
         message: String
     ): FeedbackRequest {
-        val normalizedMessage = message.trim().ifBlank {
-            "읽을 수 있는 글자가 없습니다."
-        }
+        val normalizedMessage = normalizeOcrMessage(message)
 
         return FeedbackRequest(
             priority = 3,
@@ -225,6 +242,25 @@ class FeedbackPolicy {
             throttleKey = "ocr",
             throttleMillis = FeedbackThresholds.OCR_THROTTLE_MS
         )
+    }
+
+    // 새로 추가한 부분
+    private fun normalizeOcrMessage(
+        message: String
+    ): String {
+        val trimmed = message.trim()
+
+        if (trimmed.isBlank()) {
+            return "인식된 글자가 없습니다."
+        }
+
+        if (trimmed.length <= FeedbackThresholds.OCR_MAX_SPEECH_CHARS) {
+            return trimmed
+        }
+
+        val preview = trimmed.take(FeedbackThresholds.OCR_MAX_SPEECH_CHARS)
+
+        return "인식된 글자가 깁니다. 앞부분만 안내합니다. $preview"
     }
 
     /**
@@ -347,8 +383,6 @@ class FeedbackPolicy {
                     else -> FeedbackAlertLevel.SAFE
                 }
             }
-
-            else -> FeedbackAlertLevel.SAFE
         }
     }
 
@@ -418,7 +452,6 @@ class FeedbackPolicy {
             FeedbackSensorStatus.CONNECTED -> "sensor:connected"
             FeedbackSensorStatus.DISCONNECTED -> "sensor:disconnected"
             FeedbackSensorStatus.ERROR -> "sensor:error"
-            else -> "sensor:unknown"
         }
     }
 

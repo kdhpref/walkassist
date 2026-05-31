@@ -220,7 +220,7 @@ class FeedbackViewModel(
         )
     }
 
-    private fun shouldAnnounceRequest(
+    private fun shouldAnnounceRequest(          // 여기서부터
         previous: FeedbackUiState,
         request: FeedbackRequest
     ): Boolean {
@@ -228,7 +228,9 @@ class FeedbackViewModel(
             return false
         }
 
-        if (request.priority == 1) {
+        // 실제 반복 제한은 FeedbackQueue의 throttle이 담당하도록 한다.
+        // priority 1~4는 실제 보행 안내 대상이므로 Queue까지 보낸다.
+        if (request.priority <= 4) {
             return true
         }
 
@@ -251,7 +253,7 @@ class FeedbackViewModel(
         }
 
         return false
-    }
+    }           // 여기까지 코드를 수정함
 
     private fun shouldAnnounceMessage(
         previous: FeedbackUiState,

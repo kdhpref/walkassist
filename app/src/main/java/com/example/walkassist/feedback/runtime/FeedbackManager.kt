@@ -24,6 +24,9 @@ import com.example.walkassist.feedback.core.HapticStrength
  * - FeedbackPolicy는 요청 생성만 담당합니다.
  * - FeedbackQueue는 우선순위와 반복 제한만 담당합니다.
  * - FeedbackManager는 실제 출력만 담당합니다.
+ * - FeedbackManager는 일반 안내 출력만 담당합니다.
+ * - 긴급 SOS 실행, 전화, 문자, 위치 공유는 담당하지 않습니다.
+ * - SOS는 sos/EmergencySosManager.kt에서 별도로 처리해야 합니다.
  */
 class FeedbackManager(context: Context) {
     private val accessibilityAnnouncer = AccessibilityAnnouncer(context)
@@ -175,6 +178,7 @@ class FeedbackManager(context: Context) {
      */
     fun stop() {
         hapticController.cancel()
+        speechController.stop()
     }
 
     /**

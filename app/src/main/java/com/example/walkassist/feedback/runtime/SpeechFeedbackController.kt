@@ -31,7 +31,7 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
         ) {
             Log.e(TAG, "Korean TTS is not available")
             return
-        }
+        } // 작업자 C(여준호): 기본 시작 언어는 기존 한국어 모드와 호환되도록 한국어로 유지합니다.
 
         isReady = true
 
@@ -57,6 +57,7 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
         if (!isReady || message.isBlank()) return
 
         requestAudioFocus()
+        applyLanguageForMessage(message) // 작업자 C(여준호): 영어 문장은 영어 TTS 억양으로, 한국어 문장은 한국어 TTS 억양으로 읽도록 발화 직전에 언어를 선택합니다.
         tts?.setPitch(pitchFor(level))
         tts?.setSpeechRate(rateFor(level))
 
@@ -73,11 +74,29 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
         tts?.speak(message, queueMode, params, UTTERANCE_ID)
     }
 
+    private fun applyLanguageForMessage(message: String) {
+        val targetLocale = if (containsKorean(message)) Locale.KOREAN else Locale.US
+        val languageResult = tts?.setLanguage(targetLocale)
+        if (languageResult == TextToSpeech.LANG_MISSING_DATA || languageResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+            tts?.setLanguage(Locale.KOREAN)
+        }
+    } // 작업자 C(여준호): 영어 모드의 숫자와 단위가 한국어 발음이 아니라 영어 발음으로 나가도록 TTS Locale을 바꿉니다.
+
+    private fun containsKorean(message: String): Boolean {
+        return message.any { it in '\uAC00'..'\uD7A3' }
+    } // 작업자 C(여준호): 안내 문장에 한글이 남아 있으면 한국어 TTS로 읽도록 간단히 판별합니다.
+
     fun release() {
         tts?.stop()
         tts?.shutdown()
         tts = null
         isReady = false
+        abandonAudioFocus()
+    }
+
+    // 코드 추가
+    fun stop() {
+        tts?.stop()
         abandonAudioFocus()
     }
 
