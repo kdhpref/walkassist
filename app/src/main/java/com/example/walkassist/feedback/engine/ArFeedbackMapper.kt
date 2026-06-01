@@ -31,10 +31,14 @@ class ArFeedbackMapper {
             }
 
             else -> {
+                val confidenceScore = maxOf(
+                    state.sensingConfidenceScore,
+                    state.worldMapConfidenceScore,
+                )
                 FeedbackInput.Obstacle(
                     sample = FeedbackObstacleSample(
                         distanceMeters = distance,
-                        confidence = (state.worldMapConfidenceScore / 100f).coerceIn(0f, 1f),
+                        confidence = (confidenceScore / 100f).coerceIn(0f, 1f),
                         sensorType = sensorType,
                     ),
                     direction = state.suggestedDirection,

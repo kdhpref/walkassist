@@ -10,6 +10,7 @@ import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import com.example.walkassist.feedback.core.FeedbackAlertLevel
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 
 class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
     private data class PendingSpeech(
@@ -24,6 +25,13 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
     private var audioFocusRequest: AudioFocusRequest? = null
     private var isReady = false
     private var pendingSpeech: PendingSpeech? = null
+    private val utteranceCounter = AtomicLong(0L)
+    @Volatile
+    private var activeSpeechMessage: String? = null
+    @Volatile
+    private var activeUtteranceId: String? = null
+    @Volatile
+    private var activeSpeechPriority: Int? = null
 
     override fun onInit(status: Int) {
         if (status != TextToSpeech.SUCCESS) {
@@ -46,15 +54,23 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
                 override fun onStart(utteranceId: String?) = Unit
 
                 override fun onDone(utteranceId: String?) {
+                    clearActiveSpeech(utteranceId)
                     abandonAudioFocus()
                 }
 
                 @Deprecated("Deprecated in Java")
                 override fun onError(utteranceId: String?) {
+                    clearActiveSpeech(utteranceId)
                     abandonAudioFocus()
                 }
 
                 override fun onError(utteranceId: String?, errorCode: Int) {
+                    clearActiveSpeech(utteranceId)
+                    abandonAudioFocus()
+                }
+
+                override fun onStop(utteranceId: String?, interrupted: Boolean) {
+                    clearActiveSpeech(utteranceId)
                     abandonAudioFocus()
                 }
             },
@@ -74,6 +90,7 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
         message: String,
         level: FeedbackAlertLevel,
         queueMode: Int = TextToSpeech.QUEUE_FLUSH,
+        priority: Int = defaultPriority(level),
     ) {
         if (message.isBlank()) return
         if (!isReady) {
@@ -90,14 +107,40 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
             putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_NOTIFICATION)
         }
 
-        val result = tts?.speak(message, queueMode, params, UTTERANCE_ID)
+        val utteranceId = "$UTTERANCE_ID_PREFIX-${utteranceCounter.incrementAndGet()}"
+        activeSpeechMessage = message
+        activeUtteranceId = utteranceId
+        activeSpeechPriority = priority
+        val result = tts?.speak(message, queueMode, params, utteranceId)
         if (result != TextToSpeech.SUCCESS) {
+            activeSpeechMessage = null
+            activeUtteranceId = null
+            activeSpeechPriority = null
             Log.w(TAG, "TTS speak failed result=$result")
         }
     }
 
+    fun isSpeakingOrPending(message: String): Boolean {
+        return activeSpeechMessage == message || pendingSpeech?.message == message
+    }
+
+    fun isActiveSpeech(message: String): Boolean {
+        return activeSpeechMessage == message
+    }
+
+    fun hasActiveOrPendingSpeech(): Boolean {
+        return activeSpeechMessage != null || pendingSpeech != null
+    }
+
+    fun currentPriority(): Int? {
+        return activeSpeechPriority
+    }
+
     fun release() {
         pendingSpeech = null
+        activeSpeechMessage = null
+        activeUtteranceId = null
+        activeSpeechPriority = null
         tts?.stop()
         tts?.shutdown()
         tts = null
@@ -107,8 +150,19 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
 
     fun stopSpeaking() {
         pendingSpeech = null
+        activeSpeechMessage = null
+        activeUtteranceId = null
+        activeSpeechPriority = null
         tts?.stop()
         abandonAudioFocus()
+    }
+
+    private fun clearActiveSpeech(utteranceId: String?) {
+        if (utteranceId == activeUtteranceId) {
+            activeSpeechMessage = null
+            activeUtteranceId = null
+            activeSpeechPriority = null
+        }
     }
 
     private fun requestAudioFocus() {
@@ -157,8 +211,16 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
         }
     }
 
+    private fun defaultPriority(level: FeedbackAlertLevel): Int {
+        return when (level) {
+            FeedbackAlertLevel.DANGER -> 1
+            FeedbackAlertLevel.CAUTION -> 3
+            FeedbackAlertLevel.SAFE -> 5
+        }
+    }
+
     companion object {
         private const val TAG = "SpeechFeedback"
-        private const val UTTERANCE_ID = "walkassist_feedback"
+        private const val UTTERANCE_ID_PREFIX = "walkassist_feedback"
     }
 }

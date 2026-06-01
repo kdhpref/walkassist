@@ -46,6 +46,21 @@ enum class FeedbackSensorType {
 }
 
 /**
+ * 길찾기 안내 종류.
+ *
+ * 같은 지도 안내라도 경로 이탈/다음 지점 안내는 현실 방향 보정보다 우선합니다.
+ */
+enum class NavigationFeedbackKind {
+    ROUTE_DEVIATION,
+    ROUTE_STEP,
+    ROUTE_ARRIVAL,
+    ROUTE_START_END,
+    ROUTE_SEARCH_STATUS,
+    ROUTE_REALITY,
+    ROUTE_POINT_INFO,
+}
+
+/**
  * 진동 강도
  */
 enum class HapticStrength {

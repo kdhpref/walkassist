@@ -25,6 +25,8 @@ class FeedbackViewModel(
 
     private var watchdogJob: Job? = null
     private var lastInputTimeMillis: Long = System.currentTimeMillis()
+    private var spatialReadyAnnouncementArmed = true
+    private var unusableSpatialStateStartedAtMillis = 0L
 
     fun onInput(input: FeedbackInput) {
         lastInputTimeMillis = System.currentTimeMillis()
@@ -112,6 +114,10 @@ class FeedbackViewModel(
         previous: FeedbackUiState,
         status: FeedbackSensorStatus
     ): FeedbackUiState {
+        updateSpatialReadyAnnouncementArming(
+            status = status,
+            confidence = 0f
+        )
         val request = feedbackPolicy.sensorStatusRequest(status)
 
         val nextDistanceMeters = when (status) {
@@ -161,6 +167,31 @@ class FeedbackViewModel(
         previous: FeedbackUiState,
         input: FeedbackInput.Obstacle
     ): FeedbackUiState {
+        val confidence = input.sample.confidence.coerceIn(0f, 1f)
+        updateSpatialReadyAnnouncementArming(
+            status = FeedbackSensorStatus.CONNECTED,
+            confidence = confidence
+        )
+        val shouldAnnounceSpatialReady =
+            spatialReadyAnnouncementArmed &&
+                confidence >= SPATIAL_READY_CONFIDENCE_THRESHOLD
+
+        if (shouldAnnounceSpatialReady) {
+            spatialReadyAnnouncementArmed = false
+            unusableSpatialStateStartedAtMillis = 0L
+            val request = feedbackPolicy
+                .sensorStatusRequest(FeedbackSensorStatus.CONNECTED)
+                .copy(distanceMeters = input.sample.distanceMeters)
+
+            return request.toUiState(
+                sensorStatus = FeedbackSensorStatus.CONNECTED,
+                confidence = confidence,
+                direction = input.direction,
+                crosswalkDetected = input.crosswalkDetected,
+                shouldAnnounce = false
+            )
+        }
+
         val request = feedbackPolicy.obstacleRequest(
             distanceMeters = input.sample.distanceMeters,
             direction = input.direction,
@@ -169,11 +200,33 @@ class FeedbackViewModel(
 
         return request.toUiState(
             sensorStatus = FeedbackSensorStatus.CONNECTED,
-            confidence = input.sample.confidence.coerceIn(0f, 1f),
+            confidence = confidence,
             direction = input.direction,
             crosswalkDetected = input.crosswalkDetected,
             shouldAnnounce = false
         )
+    }
+
+    private fun updateSpatialReadyAnnouncementArming(
+        status: FeedbackSensorStatus,
+        confidence: Float
+    ) {
+        val unusable = status != FeedbackSensorStatus.CONNECTED ||
+                confidence < SPATIAL_READY_CONFIDENCE_THRESHOLD
+        if (!unusable) {
+            unusableSpatialStateStartedAtMillis = 0L
+            return
+        }
+
+        val now = System.currentTimeMillis()
+        if (unusableSpatialStateStartedAtMillis == 0L) {
+            unusableSpatialStateStartedAtMillis = now
+            return
+        }
+
+        if (now - unusableSpatialStateStartedAtMillis >= SPATIAL_UNUSABLE_REARM_MS) {
+            spatialReadyAnnouncementArmed = true
+        }
     }
 
     private fun handleMessageInput(
@@ -270,5 +323,7 @@ class FeedbackViewModel(
     companion object {
         private const val WATCHDOG_CHECK_INTERVAL_MS = 2_000L
         private const val WATCHDOG_DISCONNECTED_TIMEOUT_MS = 5_000L
+        private const val SPATIAL_READY_CONFIDENCE_THRESHOLD = 0.55f
+        private const val SPATIAL_UNUSABLE_REARM_MS = 3_500L
     }
 }

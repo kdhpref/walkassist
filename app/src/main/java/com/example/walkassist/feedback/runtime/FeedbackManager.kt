@@ -11,12 +11,13 @@ import com.example.walkassist.feedback.core.FeedbackAlertLevel
 import com.example.walkassist.feedback.core.FeedbackOutputMode
 import com.example.walkassist.feedback.core.FeedbackRequest
 import com.example.walkassist.feedback.core.FeedbackSource
+import com.example.walkassist.feedback.core.FeedbackThresholds
 import com.example.walkassist.feedback.core.HapticStrength
 
 class FeedbackManager(context: Context) {
     private val accessibilityAnnouncer = AccessibilityAnnouncer(context)
     private val hapticController = HapticFeedbackController(context)
-    private val speechController = SpeechFeedbackController(context)
+    private val speechController = acquireSpeechController(context.applicationContext)
     private val toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, TONE_VOLUME_PERCENT)
     private var prioritySpeechProtectedUntilMs = 0L
 
@@ -33,6 +34,11 @@ class FeedbackManager(context: Context) {
             return
         }
 
+        if (shouldDropByThrottle(request)) {
+            Log.d(TAG, "Dropping throttled feedback key=${request.throttleKey}")
+            return
+        }
+
         if (request.outputMode.useHaptic) {
             hapticController.vibrate(
                 level = request.alertLevel,
@@ -45,10 +51,13 @@ class FeedbackManager(context: Context) {
                 message = request.message,
                 level = request.alertLevel,
                 announcementView = announcementView,
-                prioritySpeech = request.interruptCurrent || request.priority <= 2,
+                priority = request.priority,
+                interruptCurrent = request.interruptCurrent,
                 queueSpeech = queueSpeech,
             )
         }
+
+        markThrottleExecuted(request)
     }
 
     fun provideFeedback(
@@ -113,6 +122,7 @@ class FeedbackManager(context: Context) {
             message = message,
             level = level,
             queueMode = TextToSpeech.QUEUE_ADD,
+            priority = 3,
         )
     }
 
@@ -131,35 +141,58 @@ class FeedbackManager(context: Context) {
     fun release() {
         hapticController.cancel()
         toneGenerator.release()
-        speechController.release()
+        releaseSpeechController(speechController)
     }
 
     private fun speakIfNeeded(
         message: String,
         level: FeedbackAlertLevel,
         announcementView: TextView?,
-        prioritySpeech: Boolean,
+        priority: Int,
+        interruptCurrent: Boolean,
         queueSpeech: Boolean = false,
     ) {
+        if (
+            isSpatialScanningMessage(message) &&
+            speechController.isSpeakingOrPending(message)
+        ) {
+            Log.d(TAG, "Skipping duplicate spatial scanning speech")
+            return
+        }
+
         val announcedByTalkBack = accessibilityAnnouncer.announce(message, announcementView)
         if (announcedByTalkBack) return
 
         val now = SystemClock.elapsedRealtime()
+        val shouldInterruptCurrent = interruptCurrent ||
+            priority <= 2 ||
+            shouldSpatialReadyInterruptScanning(message)
+        val activePriority = speechController.currentPriority()
+        if (!queueSpeech && !shouldInterruptCurrent && activePriority != null && priority >= activePriority) {
+            Log.d(TAG, "Skipping non-interrupting speech priority=$priority active=$activePriority")
+            return
+        }
+        if (!queueSpeech && !shouldInterruptCurrent && priority >= 5 && speechController.hasActiveOrPendingSpeech()) {
+            Log.d(TAG, "Skipping low-priority speech while another speech is active")
+            return
+        }
         if (queueSpeech) {
             speechController.speak(
                 message = message,
                 level = level,
                 queueMode = TextToSpeech.QUEUE_ADD,
+                priority = priority,
             )
             return
         }
 
-        if (prioritySpeech) {
+        if (shouldInterruptCurrent) {
             prioritySpeechProtectedUntilMs = now + PRIORITY_SPEECH_PROTECTION_MS
             speechController.speak(
                 message = message,
                 level = level,
                 queueMode = TextToSpeech.QUEUE_FLUSH,
+                priority = priority,
             )
             return
         }
@@ -173,7 +206,42 @@ class FeedbackManager(context: Context) {
             message = message,
             level = level,
             queueMode = TextToSpeech.QUEUE_FLUSH,
+            priority = priority,
         )
+    }
+
+    private fun shouldDropByThrottle(
+        request: FeedbackRequest,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val key = request.throttleKey
+        if (key.isBlank()) return false
+        val throttleMillis = effectiveThrottleMillis(request)
+        if (throttleMillis <= 0L) return false
+        val lastMillis = synchronized(throttleLock) {
+            lastAnnouncementMillisByKey[key]
+        } ?: return false
+        return nowMillis - lastMillis < throttleMillis
+    }
+
+    private fun markThrottleExecuted(
+        request: FeedbackRequest,
+        nowMillis: Long = System.currentTimeMillis(),
+    ) {
+        val key = request.throttleKey
+        if (key.isBlank()) return
+        synchronized(throttleLock) {
+            lastAnnouncementMillisByKey[key] = nowMillis
+        }
+    }
+
+    private fun effectiveThrottleMillis(request: FeedbackRequest): Long {
+        if (request.throttleMillis > 0L) return request.throttleMillis
+        return if (request.priority == 1) {
+            FeedbackThresholds.DANGER_THROTTLE_MS
+        } else {
+            FeedbackThresholds.ANNOUNCE_THROTTLE_MS
+        }
     }
 
     private fun defaultHapticStrength(
@@ -196,11 +264,51 @@ class FeedbackManager(context: Context) {
         }
     }
 
+    private fun isSpatialScanningMessage(message: String): Boolean {
+        return message == SPATIAL_SCANNING_MESSAGE
+    }
+
+    private fun isSpatialReadyMessage(message: String): Boolean {
+        return message == SPATIAL_READY_MESSAGE
+    }
+
+    private fun shouldSpatialReadyInterruptScanning(message: String): Boolean {
+        return isSpatialReadyMessage(message) &&
+            speechController.isActiveSpeech(SPATIAL_SCANNING_MESSAGE)
+    }
+
     companion object {
         private const val TAG = "FeedbackManager"
+        private const val SPATIAL_SCANNING_MESSAGE = "공간 인식중입니다 카메라를 천천히 주위를 비춰주세요"
+        private const val SPATIAL_READY_MESSAGE = "공간 인식 준비가 되었습니다."
         private const val PRIORITY_SPEECH_PROTECTION_MS = 8_000L
         private const val TONE_VOLUME_PERCENT = 80
         private const val WATCH_PULSE_TONE_MS = 120
         private const val URGENT_PULSE_TONE_MS = 80
+        private val speechLock = Any()
+        private val throttleLock = Any()
+        private val lastAnnouncementMillisByKey = mutableMapOf<String, Long>()
+        private var sharedSpeechController: SpeechFeedbackController? = null
+        private var sharedSpeechControllerUsers = 0
+
+        private fun acquireSpeechController(context: Context): SpeechFeedbackController {
+            return synchronized(speechLock) {
+                val controller = sharedSpeechController ?: SpeechFeedbackController(context).also {
+                    sharedSpeechController = it
+                }
+                sharedSpeechControllerUsers += 1
+                controller
+            }
+        }
+
+        private fun releaseSpeechController(controller: SpeechFeedbackController) {
+            synchronized(speechLock) {
+                sharedSpeechControllerUsers = (sharedSpeechControllerUsers - 1).coerceAtLeast(0)
+                if (sharedSpeechControllerUsers == 0 && sharedSpeechController === controller) {
+                    controller.release()
+                    sharedSpeechController = null
+                }
+            }
+        }
     }
 }

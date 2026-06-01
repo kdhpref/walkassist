@@ -252,15 +252,24 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var oneShotVlmRequestedAtMs: Long = 0L
 
     fun requestOneShotOcr() {
+        if (oneShotVlmRequested.get() || oneShotVlmInFlight.get()) {
+            dispatchOneShotOcrResult("전방 화면 분석 중에는 문자 인식을 시작할 수 없습니다.")
+            return
+        }
         if (oneShotOcrRequested.get() || oneShotOcrInFlight.get()) {
             dispatchOneShotOcrResult("이미 문자 인식 중입니다.")
             return
         }
+        Log.i(TAG, "One-shot OCR queued")
         oneShotOcrRequested.set(true)
     }
 
     fun requestOneShotVlm() {
-        Log.d(TAG, "VLM guidance requested")
+        Log.d(TAG, "VLM guidance requested from touch release")
+        if (oneShotOcrRequested.get() || oneShotOcrInFlight.get()) {
+            dispatchOneShotVlmResult("문자 인식 중에는 전방 화면 분석을 시작할 수 없습니다.")
+            return
+        }
         if (oneShotVlmRequested.get() || oneShotVlmInFlight.get()) {
             dispatchOneShotVlmResult("이미 전방 화면을 분석 중입니다. 잠시만 기다려 주세요.")
             return
@@ -1421,6 +1430,10 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             try {
                 shouldRunOcr = oneShotOcrRequested.getAndSet(false)
                 shouldRunVlm = oneShotVlmRequested.getAndSet(false)
+                if (shouldRunOcr && shouldRunVlm) {
+                    shouldRunVlm = false
+                    dispatchOneShotVlmResult("문자 인식 중에는 전방 화면 분석을 시작할 수 없습니다.")
+                }
                 if (shouldRunVlm && !debugFlags.vlmEnabled) {
                     appendVlmInvocationLog(
                         success = false,
@@ -1684,6 +1697,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         if (!oneShotOcrInFlight.compareAndSet(false, true)) {
             return false
         }
+        Log.i(TAG, "One-shot OCR started")
 
         val ocrBitmap = try {
             bitmap.copy(Bitmap.Config.ARGB_8888, false)

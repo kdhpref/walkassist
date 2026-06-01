@@ -47,6 +47,8 @@ object FeedbackThresholds {
     const val CAUTION_OBSTACLE_THROTTLE_MS = 2_000L
     const val HAPTIC_ONLY_THROTTLE_MS = 2_000L
     const val NAVIGATION_THROTTLE_MS = 2_500L
+    const val ROUTE_DEVIATION_THROTTLE_MS = 10_000L
+    const val ROUTE_REALITY_THROTTLE_MS = 7_000L
     const val OCR_THROTTLE_MS = 1_000L
     const val SENSOR_STATUS_THROTTLE_MS = 5_000L
 }
@@ -174,16 +176,19 @@ class FeedbackPolicy {
      */
     fun navigationRequest(
         message: String,
-        distanceMeters: Float? = null
+        distanceMeters: Float? = null,
+        kind: NavigationFeedbackKind = NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+        throttleKey: String = navigationThrottleKey(kind, null),
     ): FeedbackRequest {
         val normalizedMessage = message.trim().ifBlank {
             "길찾기 안내가 없습니다."
         }
+        val priority = navigationPriority(kind)
 
         return FeedbackRequest(
-            priority = 2,
+            priority = priority,
             source = FeedbackSource.NAVIGATION,
-            alertLevel = FeedbackAlertLevel.CAUTION,
+            alertLevel = navigationAlertLevel(kind),
             message = normalizedMessage,
             outputMode = FeedbackOutputMode(
                 useSpeech = true,
@@ -191,9 +196,9 @@ class FeedbackPolicy {
                 hapticStrength = HapticStrength.LIGHT
             ),
             distanceMeters = distanceMeters,
-            interruptCurrent = false,
-            throttleKey = "navigation",
-            throttleMillis = FeedbackThresholds.NAVIGATION_THROTTLE_MS
+            interruptCurrent = navigationInterruptsCurrent(kind),
+            throttleKey = throttleKey,
+            throttleMillis = navigationThrottleMillis(kind)
         )
     }
 
@@ -249,13 +254,18 @@ class FeedbackPolicy {
 
         val useSpeech = when (status) {
             FeedbackSensorStatus.ERROR,
-            FeedbackSensorStatus.DISCONNECTED,
-            FeedbackSensorStatus.WAITING -> true
-
+            FeedbackSensorStatus.DISCONNECTED -> true
+            FeedbackSensorStatus.WAITING,
             FeedbackSensorStatus.CONNECTED -> false
         }
         return FeedbackRequest(
-            priority = if (useSpeech) 3 else 5,
+            priority = when (status) {
+                FeedbackSensorStatus.WAITING,
+                FeedbackSensorStatus.CONNECTED -> 5
+                FeedbackSensorStatus.DISCONNECTED,
+                FeedbackSensorStatus.ERROR -> 3
+                else -> if (useSpeech) 3 else 5
+            },
             source = FeedbackSource.AR_OBSTACLE,
             alertLevel = alertLevel,
             message = statusMessage(status),
@@ -306,8 +316,8 @@ class FeedbackPolicy {
         status: FeedbackSensorStatus
     ): String {
         return when (status) {
-            FeedbackSensorStatus.WAITING -> "공간 인식 대기 중입니다."
-            FeedbackSensorStatus.CONNECTED -> "공간 인식이 연결되었습니다."
+            FeedbackSensorStatus.WAITING -> "공간 인식중입니다 카메라를 천천히 주위를 비춰주세요"
+            FeedbackSensorStatus.CONNECTED -> "공간 인식 준비가 되었습니다."
             FeedbackSensorStatus.DISCONNECTED -> "센서 데이터가 일시적으로 끊겼습니다."
             FeedbackSensorStatus.ERROR -> "공간 인식에 문제가 발생했습니다."
         }
@@ -408,6 +418,73 @@ class FeedbackPolicy {
             4 -> FeedbackThresholds.HAPTIC_ONLY_THROTTLE_MS
             else -> 0L
         }
+    }
+
+    private fun navigationPriority(kind: NavigationFeedbackKind): Int {
+        return when (kind) {
+            NavigationFeedbackKind.ROUTE_DEVIATION,
+            NavigationFeedbackKind.ROUTE_STEP,
+            NavigationFeedbackKind.ROUTE_ARRIVAL -> 2
+
+            NavigationFeedbackKind.ROUTE_START_END,
+            NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+            NavigationFeedbackKind.ROUTE_POINT_INFO -> 3
+
+            NavigationFeedbackKind.ROUTE_REALITY -> 5
+        }
+    }
+
+    private fun navigationAlertLevel(kind: NavigationFeedbackKind): FeedbackAlertLevel {
+        return when (kind) {
+            NavigationFeedbackKind.ROUTE_DEVIATION -> FeedbackAlertLevel.DANGER
+            NavigationFeedbackKind.ROUTE_STEP,
+            NavigationFeedbackKind.ROUTE_ARRIVAL,
+            NavigationFeedbackKind.ROUTE_START_END,
+            NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+            NavigationFeedbackKind.ROUTE_POINT_INFO,
+            NavigationFeedbackKind.ROUTE_REALITY -> FeedbackAlertLevel.CAUTION
+        }
+    }
+
+    private fun navigationInterruptsCurrent(kind: NavigationFeedbackKind): Boolean {
+        return when (kind) {
+            NavigationFeedbackKind.ROUTE_DEVIATION,
+            NavigationFeedbackKind.ROUTE_STEP,
+            NavigationFeedbackKind.ROUTE_ARRIVAL -> true
+
+            NavigationFeedbackKind.ROUTE_START_END,
+            NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+            NavigationFeedbackKind.ROUTE_POINT_INFO,
+            NavigationFeedbackKind.ROUTE_REALITY -> false
+        }
+    }
+
+    private fun navigationThrottleMillis(kind: NavigationFeedbackKind): Long {
+        return when (kind) {
+            NavigationFeedbackKind.ROUTE_DEVIATION -> FeedbackThresholds.ROUTE_DEVIATION_THROTTLE_MS
+            NavigationFeedbackKind.ROUTE_REALITY -> FeedbackThresholds.ROUTE_REALITY_THROTTLE_MS
+            NavigationFeedbackKind.ROUTE_STEP,
+            NavigationFeedbackKind.ROUTE_ARRIVAL,
+            NavigationFeedbackKind.ROUTE_START_END,
+            NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+            NavigationFeedbackKind.ROUTE_POINT_INFO -> FeedbackThresholds.NAVIGATION_THROTTLE_MS
+        }
+    }
+
+    fun navigationThrottleKey(
+        kind: NavigationFeedbackKind,
+        discriminator: String? = null
+    ): String {
+        val base = when (kind) {
+            NavigationFeedbackKind.ROUTE_DEVIATION -> "route:deviation"
+            NavigationFeedbackKind.ROUTE_STEP -> "route:step"
+            NavigationFeedbackKind.ROUTE_ARRIVAL -> "route:arrival"
+            NavigationFeedbackKind.ROUTE_START_END -> "route:start_end"
+            NavigationFeedbackKind.ROUTE_SEARCH_STATUS -> "route:search_status"
+            NavigationFeedbackKind.ROUTE_REALITY -> "route:reality"
+            NavigationFeedbackKind.ROUTE_POINT_INFO -> "route:point_info"
+        }
+        return discriminator?.takeIf { it.isNotBlank() }?.let { "$base:$it" } ?: base
     }
 
     private fun sensorThrottleKey(

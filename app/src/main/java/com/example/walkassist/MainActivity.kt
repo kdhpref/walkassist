@@ -5,9 +5,12 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
@@ -27,6 +30,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -43,15 +47,22 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.composed
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -68,7 +79,11 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.example.walkassist.feedback.core.FeedbackUiState
 import com.example.walkassist.feedback.core.FeedbackAlertLevel
 import com.example.walkassist.feedback.core.FeedbackOutputMode
+import com.example.walkassist.feedback.core.FeedbackRequest
 import com.example.walkassist.feedback.core.FeedbackSensorStatus
+import com.example.walkassist.feedback.core.FeedbackSource
+import com.example.walkassist.feedback.core.FeedbackThresholds
+import com.example.walkassist.feedback.core.FeedbackPolicy
 import com.example.walkassist.feedback.engine.ArFeedbackMapper
 import com.example.walkassist.feedback.engine.FeedbackViewModel
 import com.example.walkassist.feedback.runtime.FeedbackManager
@@ -80,11 +95,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToLong
+
+private const val OCR_LONG_PRESS_TRIGGER_MS = 2_000L
+private const val TOUCH_SLOP_PX = 36f
 
 class MainActivity : AppCompatActivity() {
     private val fragmentContainerId = 1001
     private val feedbackViewModel by viewModels<FeedbackViewModel>()
     private val arFeedbackMapper = ArFeedbackMapper()
+    private val feedbackPolicy = FeedbackPolicy()
     private lateinit var feedbackManager: FeedbackManager
     private var arFragment: WalkAssistArFragment? = null
     private var lowDistanceConfidenceStartedAtMs = 0L
@@ -149,9 +169,10 @@ class MainActivity : AppCompatActivity() {
                     WalkAssistRootOverlay(
                         state = arState,
                         feedbackState = feedbackState,
-                        onOcrClick = ::requestOneShotOcr,
-                        onVlmClick = ::requestOneShotVlm,
+                        onOcrLongPress = ::requestOneShotOcr,
+                        onVlmRelease = ::requestOneShotVlm,
                         onStopReplayRecording = ::stopArCoreReplayRecording,
+                        onMapOpening = { feedbackManager.stopSpeech() },
                         onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
                         onDebugVisualizationChanged = ::setDebugVisualizationVisible,
                         onDebugFlagsPersisted = ::persistDebugPipelineFlags,
@@ -177,15 +198,16 @@ class MainActivity : AppCompatActivity() {
             ?.let(android.net.Uri::parse)
         fragment.onOneShotOcrResult = { message ->
             feedbackManager.provideFeedback(
-                message = message,
-                level = FeedbackAlertLevel.CAUTION,
+                feedbackPolicy.ocrRequest(message)
             )
         }
         fragment.onOneShotVlmResult = { message ->
             feedbackManager.provideFeedback(
-                message = message,
-                level = FeedbackAlertLevel.CAUTION,
-                prioritySpeech = true,
+                userRequestedFeedbackRequest(
+                    message = message,
+                    throttleKey = "vlm:manual_result",
+                ),
+                queueSpeech = true,
             )
         }
     }
@@ -272,6 +294,15 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        Log.i(TAG, "One-shot OCR requested from 2s long press")
+        feedbackManager.stopSpeech()
+        feedbackManager.provideFeedback(
+            lowPriorityStatusRequest(
+                message = "문자 인식을 시작합니다.",
+                throttleKey = "ocr:start",
+                alertLevel = FeedbackAlertLevel.CAUTION,
+            )
+        )
         fragment.requestOneShotOcr()
     }
 
@@ -295,7 +326,32 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        announceVlmDirectionHint(ArMeasurementBridge.state.value)
         fragment.requestOneShotVlm()
+    }
+
+    private fun announceVlmDirectionHint(state: ArMeasurementState) {
+        val message = vlmDirectionHintMessage(state) ?: return
+        feedbackManager.provideFeedback(
+            userRequestedFeedbackRequest(
+                message = message,
+                throttleKey = "vlm:direction_hint",
+            )
+        )
+    }
+
+    private fun vlmDirectionHintMessage(state: ArMeasurementState): String? {
+        if (state.trackingLabel != "tracking") {
+            return "보행 가능 방향 확인 필요"
+        }
+        return when (state.suggestedDirection) {
+            "left" -> "왼쪽 공간 확보됨"
+            "right" -> "오른쪽 공간 확보됨"
+            "center" -> "전방 공간 확보됨"
+            "blocked", "stop_or_sidestep" -> "공간 확보 안됨. 보행 가능 방향 확인 필요"
+            "searching", "unknown" -> "보행 가능 방향 확인 필요"
+            else -> null
+        }
     }
 
     private fun stopArCoreReplayRecording() {
@@ -377,12 +433,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         feedbackManager.provideFeedback(
-            message = LOW_DISTANCE_CONFIDENCE_MESSAGE,
-            level = FeedbackAlertLevel.CAUTION,
-            outputMode = FeedbackOutputMode(
-                useSpeech = true,
-                useHaptic = false,
-            ),
+            lowPriorityStatusRequest(
+                message = LOW_DISTANCE_CONFIDENCE_MESSAGE,
+                throttleKey = "sensor:low_distance_confidence",
+                alertLevel = FeedbackAlertLevel.CAUTION,
+                throttleMillis = LOW_DISTANCE_CONFIDENCE_ANNOUNCE_COOLDOWN_MS,
+            )
         )
         lastLowDistanceConfidenceAnnouncementAtMs = now
         awaitingDistanceConfidenceRecoveryAnnouncement = true
@@ -392,15 +448,45 @@ class MainActivity : AppCompatActivity() {
         if (!awaitingDistanceConfidenceRecoveryAnnouncement) return
 
         awaitingDistanceConfidenceRecoveryAnnouncement = false
-        if (!WalkAssistSettings.isArcoreTtsEnabled(this)) return
+    }
 
-        feedbackManager.provideFeedback(
-            message = DISTANCE_CONFIDENCE_RECOVERED_MESSAGE,
-            level = FeedbackAlertLevel.SAFE,
+    private fun lowPriorityStatusRequest(
+        message: String,
+        throttleKey: String,
+        alertLevel: FeedbackAlertLevel = FeedbackAlertLevel.SAFE,
+        throttleMillis: Long = FeedbackThresholds.SENSOR_STATUS_THROTTLE_MS,
+    ): FeedbackRequest {
+        return FeedbackRequest(
+            priority = 4,
+            source = FeedbackSource.AR_OBSTACLE,
+            alertLevel = alertLevel,
+            message = message,
             outputMode = FeedbackOutputMode(
                 useSpeech = true,
                 useHaptic = false,
             ),
+            interruptCurrent = false,
+            throttleKey = throttleKey,
+            throttleMillis = throttleMillis,
+        )
+    }
+
+    private fun userRequestedFeedbackRequest(
+        message: String,
+        throttleKey: String,
+    ): FeedbackRequest {
+        return FeedbackRequest(
+            priority = 3,
+            source = FeedbackSource.OCR,
+            alertLevel = FeedbackAlertLevel.CAUTION,
+            message = message,
+            outputMode = FeedbackOutputMode(
+                useSpeech = true,
+                useHaptic = false,
+            ),
+            interruptCurrent = false,
+            throttleKey = throttleKey,
+            throttleMillis = FeedbackThresholds.OCR_THROTTLE_MS,
         )
     }
 
@@ -410,20 +496,27 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val urgent = obstacleDistance <= LOCAL_MAP_URGENT_OBSTACLE_METERS
-        val watch = obstacleDistance <= LOCAL_MAP_WATCH_OBSTACLE_METERS
-        if (!urgent && !watch) return
+        if (obstacleDistance > LOCAL_MAP_WATCH_OBSTACLE_METERS) return
 
         val now = SystemClock.elapsedRealtime()
-        val intervalMs = if (urgent) {
-            LOCAL_MAP_URGENT_PULSE_INTERVAL_MS
-        } else {
-            LOCAL_MAP_WATCH_PULSE_INTERVAL_MS
-        }
+        val intervalMs = pulseIntervalForObstacleDistance(obstacleDistance)
         if (now - lastLocalMapObstaclePulseAtMs < intervalMs) return
 
-        feedbackManager.playObstaclePulse(urgent = urgent)
+        feedbackManager.playObstaclePulse(
+            urgent = obstacleDistance <= LOCAL_MAP_CRITICAL_OBSTACLE_METERS
+        )
         lastLocalMapObstaclePulseAtMs = now
+    }
+
+    private fun pulseIntervalForObstacleDistance(distanceMeters: Float): Long {
+        val normalized = (
+            (distanceMeters - LOCAL_MAP_CRITICAL_OBSTACLE_METERS) /
+                (LOCAL_MAP_WATCH_OBSTACLE_METERS - LOCAL_MAP_CRITICAL_OBSTACLE_METERS)
+            ).coerceIn(0f, 1f)
+        return (
+            LOCAL_MAP_FASTEST_PULSE_INTERVAL_MS +
+                ((LOCAL_MAP_SLOWEST_PULSE_INTERVAL_MS - LOCAL_MAP_FASTEST_PULSE_INTERVAL_MS) * normalized)
+            ).roundToLong()
     }
 
     private fun shouldMonitorDistanceConfidence(state: ArMeasurementState): Boolean {
@@ -561,15 +654,14 @@ class MainActivity : AppCompatActivity() {
         private const val REQUEST_STARTUP_PERMISSIONS = 100
         private const val REQUEST_GEOSPATIAL_LOCATION_PERMISSION = 101
         private const val LOW_DISTANCE_CONFIDENCE_SCORE_THRESHOLD = 55
-        private const val LOW_DISTANCE_CONFIDENCE_PERSISTENCE_MS = 3_500L
-        private const val LOW_DISTANCE_CONFIDENCE_ANNOUNCE_COOLDOWN_MS = 20_000L
+        private const val LOW_DISTANCE_CONFIDENCE_PERSISTENCE_MS = 15_000L
+        private const val LOW_DISTANCE_CONFIDENCE_ANNOUNCE_COOLDOWN_MS = 60_000L
         private const val LOW_DISTANCE_CONFIDENCE_MESSAGE =
             "거리 신뢰도값이 낮음. 바닥과 주변 경계를 인식할 수 있도록 천천히 카메라를 움직여주세요."
-        private const val DISTANCE_CONFIDENCE_RECOVERED_MESSAGE = "거리측정 활성화"
         private const val LOCAL_MAP_WATCH_OBSTACLE_METERS = 3.0f
-        private const val LOCAL_MAP_URGENT_OBSTACLE_METERS = 1.3f
-        private const val LOCAL_MAP_WATCH_PULSE_INTERVAL_MS = 2_000L
-        private const val LOCAL_MAP_URGENT_PULSE_INTERVAL_MS = 1_000L
+        private const val LOCAL_MAP_CRITICAL_OBSTACLE_METERS = 0.7f
+        private const val LOCAL_MAP_FASTEST_PULSE_INTERVAL_MS = 500L
+        private const val LOCAL_MAP_SLOWEST_PULSE_INTERVAL_MS = 2_000L
     }
 }
 
@@ -577,14 +669,17 @@ class MainActivity : AppCompatActivity() {
 private fun WalkAssistRootOverlay(
     state: ArMeasurementState,
     feedbackState: FeedbackUiState,
-    onOcrClick: () -> Unit,
-    onVlmClick: () -> Unit,
+    onOcrLongPress: () -> Unit,
+    onVlmRelease: () -> Unit,
     onStopReplayRecording: () -> Unit,
+    onMapOpening: () -> Unit,
     onPlaneMeshDebugChanged: (Boolean) -> Unit,
     onDebugVisualizationChanged: (Boolean) -> Unit,
     onDebugFlagsPersisted: (DebugPipelineFlags) -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
+    var appLanguage by remember { mutableStateOf(WalkAssistLanguage.KO) }
+    val uiText = walkAssistUiText(appLanguage)
     var replayState by remember { mutableStateOf(ArCoreReplayController.currentState()) }
     val context = LocalContext.current
     var debugFlags by remember { mutableStateOf(WalkAssistSettings.debugPipelineFlags(context)) }
@@ -608,6 +703,7 @@ private fun WalkAssistRootOverlay(
         onDispose { ArCoreReplayController.removeListener(listener) }
     }
     val openMapNavigation = {
+        onMapOpening()
         context.startActivity(Intent(context, MapNavigationActivity::class.java))
     }
     val openSettings = {
@@ -618,40 +714,67 @@ private fun WalkAssistRootOverlay(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .clickable(onClick = onVlmClick),
+                .walkAssistCameraGestureInput(
+                    onOcrLongPress = onOcrLongPress,
+                    onVlmRelease = onVlmRelease,
+                ),
         )
 
         if (cameraUiVisible) {
             MeasurementOverlay(
                 state = state,
                 feedbackState = feedbackState,
+                language = appLanguage,
                 debugFlags = debugFlags,
                 onDebugFlagsChanged = updateDebugFlags,
                 onPlaneMeshDebugChanged = onPlaneMeshDebugChanged,
                 onDebugVisualizationChanged = onDebugVisualizationChanged,
             )
             CameraUiControls(
+                language = appLanguage,
                 onGuideClick = { cameraUiVisible = false },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 14.dp, bottom = 150.dp),
+                    .padding(end = 14.dp, bottom = 185.dp),
             )
         } else {
             GuideStatusOverlay(
                 arState = state,
                 feedbackState = feedbackState,
+                language = appLanguage,
                 onCameraClick = { cameraUiVisible = true },
                 onMapClick = openMapNavigation,
             )
         }
 
-        GuideActionChip(
-            text = "설정",
-            onClick = openSettings,
+        if (!cameraUiVisible) {
+            FeedbackOverlayCard(
+                state = feedbackState,
+                languageCode = appLanguage.code,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 14.dp, bottom = 18.dp),
+            )
+        }
+
+        Column(
             modifier = Modifier
                 .align(Alignment.TopEnd)
                 .padding(top = 104.dp, end = 6.dp),
-        )
+            horizontalAlignment = Alignment.End,
+        ) {
+            GuideActionChip(
+                text = uiText.settings,
+                onClick = openSettings,
+                contentDescription = uiText.settingsA11y,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            GuideActionChip(
+                text = uiText.languageToggle,
+                onClick = { appLanguage = appLanguage.toggle() },
+                contentDescription = uiText.languageToggleA11y,
+            )
+        }
 
         ResourceUsagePanel(
             usage = resourceUsage,
@@ -667,14 +790,99 @@ private fun WalkAssistRootOverlay(
                 .align(Alignment.TopStart)
                 .padding(top = 14.dp, start = 14.dp),
         )
+    }
+}
 
-        GuideActionChip(
-            text = "OCR",
-            onClick = onOcrClick,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 18.dp),
-        )
+@OptIn(ExperimentalComposeUiApi::class)
+private fun Modifier.walkAssistCameraGestureInput(
+    onOcrLongPress: () -> Unit,
+    onVlmRelease: () -> Unit,
+): Modifier = composed {
+    val gestureState = remember {
+        object {
+            val handler = Handler(Looper.getMainLooper())
+            var downAtMs = 0L
+            var ocrTriggered = false
+            var pointerMovedTooFar = false
+            var downX = 0f
+            var downY = 0f
+            var triggerOcr: Runnable? = null
+
+            fun clearTimer() {
+                triggerOcr?.let(handler::removeCallbacks)
+                triggerOcr = null
+            }
+
+            fun reset() {
+                clearTimer()
+                downAtMs = 0L
+                ocrTriggered = false
+                pointerMovedTooFar = false
+                downX = 0f
+                downY = 0f
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            gestureState.reset()
+        }
+    }
+
+    pointerInteropFilter { event ->
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                gestureState.reset()
+                gestureState.downAtMs = event.eventTime
+                gestureState.downX = event.x
+                gestureState.downY = event.y
+                val triggerOcr = Runnable {
+                    if (
+                        gestureState.downAtMs > 0L &&
+                        !gestureState.pointerMovedTooFar &&
+                        !gestureState.ocrTriggered
+                    ) {
+                        gestureState.ocrTriggered = true
+                        gestureState.clearTimer()
+                        onOcrLongPress()
+                    }
+                }
+                gestureState.triggerOcr = triggerOcr
+                gestureState.handler.postDelayed(triggerOcr, OCR_LONG_PRESS_TRIGGER_MS)
+                true
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val dx = event.x - gestureState.downX
+                val dy = event.y - gestureState.downY
+                if ((dx * dx) + (dy * dy) > TOUCH_SLOP_PX * TOUCH_SLOP_PX) {
+                    gestureState.pointerMovedTooFar = true
+                    gestureState.clearTimer()
+                }
+                true
+            }
+
+            MotionEvent.ACTION_UP -> {
+                gestureState.clearTimer()
+                if (
+                    gestureState.downAtMs > 0L &&
+                    !gestureState.pointerMovedTooFar &&
+                    !gestureState.ocrTriggered
+                ) {
+                    onVlmRelease()
+                }
+                gestureState.reset()
+                true
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                gestureState.reset()
+                true
+            }
+
+            else -> true
+        }
     }
 }
 
@@ -756,14 +964,18 @@ private fun ArCoreReplayStatusPanel(
     }
 }
 
+private val GUIDE_STATUS_CONTENT_OFFSET_Y = (-56).dp
+
 @Composable
 private fun GuideStatusOverlay(
     arState: ArMeasurementState,
     feedbackState: FeedbackUiState,
+    language: WalkAssistLanguage,
     onCameraClick: () -> Unit,
     onMapClick: () -> Unit,
 ) {
-    val palette = guidePalette(feedbackState.alertLevel, feedbackState.sensorStatus)
+    val palette = guidePalette(feedbackState.alertLevel, feedbackState.sensorStatus, language)
+    val uiText = walkAssistUiText(language)
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -771,7 +983,9 @@ private fun GuideStatusOverlay(
             .padding(24.dp),
     ) {
         Column(
-            modifier = Modifier.align(Alignment.Center),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .offset(y = GUIDE_STATUS_CONTENT_OFFSET_Y),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
@@ -789,14 +1003,14 @@ private fun GuideStatusOverlay(
             )
             Spacer(modifier = Modifier.height(18.dp))
             Text(
-                text = feedbackState.message,
+                text = presentableFeedbackMessage(feedbackState, language),
                 color = palette.foreground,
                 fontSize = 24.sp,
                 fontWeight = FontWeight.Medium,
             )
             Spacer(modifier = Modifier.height(14.dp))
             Text(
-                text = guideDistanceText(feedbackState, arState),
+                text = guideDistanceText(feedbackState, arState, language),
                 color = palette.foreground.copy(alpha = 0.86f),
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Medium,
@@ -837,15 +1051,24 @@ private fun GuideStatusOverlay(
                 .padding(end = 6.dp, bottom = 18.dp),
             horizontalAlignment = Alignment.End,
         ) {
-            GuideActionChip(
-                text = "길찾기",
-                onClick = onMapClick,
+            Text(
+                text = guideSensorStatus(feedbackState.sensorStatus, language),
+                color = palette.foreground.copy(alpha = 0.82f),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
             )
             Spacer(modifier = Modifier.height(10.dp))
             GuideActionChip(
-                text = "카메라 보기",
+                text = uiText.navigation,
+                onClick = onMapClick,
+                contentDescription = uiText.navigationA11y,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            GuideActionChip(
+                text = uiText.cameraView,
                 onClick = onCameraClick,
                 modifier = Modifier.width(112.dp),
+                contentDescription = uiText.cameraViewA11y,
             )
         }
     }
@@ -853,16 +1076,19 @@ private fun GuideStatusOverlay(
 
 @Composable
 private fun CameraUiControls(
+    language: WalkAssistLanguage,
     onGuideClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val uiText = walkAssistUiText(language)
     Column(
         modifier = modifier,
         horizontalAlignment = Alignment.End,
     ) {
         GuideActionChip(
-            text = "큰 화면",
+            text = uiText.guideScreen,
             onClick = onGuideClick,
+            contentDescription = uiText.guideScreenA11y,
         )
     }
 }
@@ -872,6 +1098,7 @@ private fun GuideActionChip(
     text: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    contentDescription: String = text,
 ) {
     Text(
         text = text,
@@ -880,6 +1107,11 @@ private fun GuideActionChip(
         fontWeight = FontWeight.Bold,
         textAlign = TextAlign.Center,
         modifier = modifier
+            .semantics {
+                role = Role.Button
+                this.contentDescription = contentDescription
+            }
+            .defaultMinSize(minWidth = 72.dp, minHeight = 48.dp)
             .background(Color(0x99121820), RoundedCornerShape(18.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 18.dp, vertical = 12.dp),
@@ -893,15 +1125,68 @@ private data class GuidePalette(
     val icon: String,
 )
 
+private enum class WalkAssistLanguage(val code: String) {
+    KO("ko"),
+    EN("en"),
+}
+
+private fun WalkAssistLanguage.toggle(): WalkAssistLanguage {
+    return if (this == WalkAssistLanguage.KO) WalkAssistLanguage.EN else WalkAssistLanguage.KO
+}
+
+private data class WalkAssistUiText(
+    val navigation: String,
+    val navigationA11y: String,
+    val cameraView: String,
+    val cameraViewA11y: String,
+    val settings: String,
+    val settingsA11y: String,
+    val guideScreen: String,
+    val guideScreenA11y: String,
+    val languageToggle: String,
+    val languageToggleA11y: String,
+)
+
+private fun walkAssistUiText(language: WalkAssistLanguage): WalkAssistUiText {
+    return when (language) {
+        WalkAssistLanguage.KO -> WalkAssistUiText(
+            navigation = "길찾기",
+            navigationA11y = "길찾기 화면으로 이동",
+            cameraView = "카메라 보기",
+            cameraViewA11y = "카메라 화면 보기",
+            settings = "설정",
+            settingsA11y = "설정 화면으로 이동",
+            guideScreen = "큰 화면",
+            guideScreenA11y = "큰 안내 화면으로 이동",
+            languageToggle = "English",
+            languageToggleA11y = "영어 표시로 변경",
+        )
+
+        WalkAssistLanguage.EN -> WalkAssistUiText(
+            navigation = "Route",
+            navigationA11y = "Open route navigation",
+            cameraView = "Camera",
+            cameraViewA11y = "Open camera view",
+            settings = "Settings",
+            settingsA11y = "Open settings",
+            guideScreen = "Guide",
+            guideScreenA11y = "Open guide screen",
+            languageToggle = "Korean",
+            languageToggleA11y = "Change display language to Korean",
+        )
+    }
+}
+
 private fun guidePalette(
     alertLevel: FeedbackAlertLevel,
     sensorStatus: FeedbackSensorStatus,
+    language: WalkAssistLanguage,
 ): GuidePalette {
     if (sensorStatus == FeedbackSensorStatus.WAITING || sensorStatus == FeedbackSensorStatus.DISCONNECTED) {
         return GuidePalette(
             background = Color(0xFF4A5568),
             foreground = Color.White,
-            title = "대기",
+            title = if (language == WalkAssistLanguage.EN) "Waiting" else "대기",
             icon = "..."
         )
     }
@@ -909,43 +1194,94 @@ private fun guidePalette(
         FeedbackAlertLevel.SAFE -> GuidePalette(
             background = Color(0xFF15803D),
             foreground = Color.White,
-            title = "안전",
+            title = if (language == WalkAssistLanguage.EN) "Safe" else "안전",
             icon = "OK",
         )
         FeedbackAlertLevel.CAUTION -> GuidePalette(
             background = Color(0xFFF59E0B),
             foreground = Color(0xFF17120A),
-            title = "주의",
+            title = if (language == WalkAssistLanguage.EN) "Caution" else "주의",
             icon = "!",
         )
         FeedbackAlertLevel.DANGER -> GuidePalette(
             background = Color(0xFFDC2626),
             foreground = Color.White,
-            title = "위험",
+            title = if (language == WalkAssistLanguage.EN) "Danger" else "위험",
             icon = "!!",
         )
+    }
+}
+
+private fun presentableFeedbackMessage(
+    feedbackState: FeedbackUiState,
+    language: WalkAssistLanguage,
+): String {
+    if (language == WalkAssistLanguage.KO) return feedbackState.message
+
+    return when (feedbackState.sensorStatus) {
+        FeedbackSensorStatus.WAITING -> "Collecting spatial information."
+        FeedbackSensorStatus.DISCONNECTED -> "Sensor data is temporarily disconnected."
+        FeedbackSensorStatus.ERROR -> "A spatial recognition problem occurred."
+        FeedbackSensorStatus.CONNECTED -> when (feedbackState.alertLevel) {
+            FeedbackAlertLevel.SAFE -> "Path ahead is clear."
+            FeedbackAlertLevel.CAUTION -> englishDirectionMessage(feedbackState.direction)
+                ?: "Check the path ahead."
+            FeedbackAlertLevel.DANGER -> englishDirectionMessage(feedbackState.direction)
+                ?: "Obstacle ahead. Stop and check your surroundings."
+        }
+    }
+}
+
+private fun englishDirectionMessage(direction: String): String? {
+    return when (direction.lowercase()) {
+        "left" -> "Move left."
+        "right" -> "Move right."
+        "center" -> "Keep center."
+        "blocked" -> "Stop and check your surroundings."
+        else -> null
     }
 }
 
 private fun guideDistanceText(
     feedbackState: FeedbackUiState,
     arState: ArMeasurementState,
+    language: WalkAssistLanguage,
 ): String {
     val distance = feedbackState.distanceMeters ?: arState.collisionDistanceMeters
     val confidence = (feedbackState.confidence * 100f).toInt().coerceIn(0, 100)
     return if (distance == null) {
-        "공간 정보를 수집하는 중입니다."
+        if (language == WalkAssistLanguage.EN) {
+            "Collecting spatial information."
+        } else {
+            "공간 정보를 수집하는 중입니다."
+        }
     } else {
-        "전방 ${formatMetersShort(distance)} / 신뢰도 $confidence%"
+        if (language == WalkAssistLanguage.EN) {
+            "Ahead ${formatMetersShort(distance)} / confidence $confidence%"
+        } else {
+            "전방 ${formatMetersShort(distance)} / 신뢰도 $confidence%"
+        }
     }
 }
 
-private fun guideSensorStatus(status: FeedbackSensorStatus): String {
-    return when (status) {
-        FeedbackSensorStatus.WAITING -> "센서 대기 중"
-        FeedbackSensorStatus.CONNECTED -> "센서 연결됨"
-        FeedbackSensorStatus.DISCONNECTED -> "센서 끊김"
-        FeedbackSensorStatus.ERROR -> "센서 오류"
+private fun guideSensorStatus(
+    status: FeedbackSensorStatus,
+    language: WalkAssistLanguage,
+): String {
+    return when (language) {
+        WalkAssistLanguage.KO -> when (status) {
+            FeedbackSensorStatus.WAITING -> "센서 대기 중"
+            FeedbackSensorStatus.CONNECTED -> "센서 연결됨"
+            FeedbackSensorStatus.DISCONNECTED -> "센서 끊김"
+            FeedbackSensorStatus.ERROR -> "센서 오류"
+        }
+
+        WalkAssistLanguage.EN -> when (status) {
+            FeedbackSensorStatus.WAITING -> "Sensor waiting"
+            FeedbackSensorStatus.CONNECTED -> "Sensor connected"
+            FeedbackSensorStatus.DISCONNECTED -> "Sensor disconnected"
+            FeedbackSensorStatus.ERROR -> "Sensor error"
+        }
     }
 }
 
@@ -953,6 +1289,7 @@ private fun guideSensorStatus(status: FeedbackSensorStatus): String {
 private fun MeasurementOverlay(
     state: ArMeasurementState,
     feedbackState: FeedbackUiState,
+    language: WalkAssistLanguage,
     debugFlags: DebugPipelineFlags,
     onDebugFlagsChanged: (DebugPipelineFlags) -> Unit,
     onPlaneMeshDebugChanged: (Boolean) -> Unit,
@@ -992,6 +1329,7 @@ private fun MeasurementOverlay(
 
         FeedbackOverlayCard(
             state = feedbackState,
+            languageCode = language.code,
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(start = 14.dp, bottom = 18.dp),
@@ -1005,7 +1343,7 @@ private fun MeasurementOverlay(
                 .background(Color(0xB8121820), RoundedCornerShape(20.dp))
                 .padding(horizontal = 14.dp, vertical = 14.dp),
         ) {
-            val (riskText, riskColor) = presentableRisk(state.riskLabel)
+            val (riskText, riskColor) = presentableRisk(state.riskLabel, language)
             val confidenceColor = when {
                 state.sensingConfidenceScore >= 80 -> Color(0xFF96E2B5)
                 state.sensingConfidenceScore >= 55 -> Color(0xFFFFDB7A)
@@ -1026,7 +1364,7 @@ private fun MeasurementOverlay(
             )
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = state.guidanceLabel,
+                text = presentableArGuidance(state.guidanceLabel, language),
                 color = Color.White,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Medium,
@@ -1054,14 +1392,22 @@ private fun MeasurementOverlay(
             )
             Spacer(modifier = Modifier.height(10.dp))
             Text(
-                text = "공간 인식 신뢰도 ${state.sensingConfidenceScore}점",
+                text = if (language == WalkAssistLanguage.EN) {
+                    "Spatial confidence ${state.sensingConfidenceScore}"
+                } else {
+                    "공간 인식 신뢰도 ${state.sensingConfidenceScore}점"
+                },
                 color = confidenceColor,
                 fontSize = 13.sp,
             )
             state.timeToCollisionSeconds?.takeIf { state.riskLabel != "stable" }?.let { ttc ->
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "충돌 예상 ${formatSeconds(ttc)}",
+                    text = if (language == WalkAssistLanguage.EN) {
+                        "Collision in ${formatSeconds(ttc, language)}"
+                    } else {
+                        "충돌 예상 ${formatSeconds(ttc, language)}"
+                    },
                     color = riskColor,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
@@ -1101,6 +1447,7 @@ private fun MeasurementOverlay(
             }
             DebugOverlay(
                 state = state,
+                feedbackState = feedbackState,
                 debugFlags = debugFlags,
                 onDebugFlagsChanged = onDebugFlagsChanged,
                 modifier = Modifier
@@ -1374,6 +1721,7 @@ private fun depthProfilePitchLabel(pitchDownDegrees: Float): String {
 @Composable
 private fun DebugOverlay(
     state: ArMeasurementState,
+    feedbackState: FeedbackUiState,
     debugFlags: DebugPipelineFlags,
     onDebugFlagsChanged: (DebugPipelineFlags) -> Unit,
     modifier: Modifier = Modifier,
@@ -1477,6 +1825,20 @@ private fun DebugOverlay(
                 ArStatusLevel.SAFE -> Color(0xFF9AE7C7)
                 ArStatusLevel.INFO -> Color(0xFFD9E2EA)
             },
+        )
+        val rawGridMinDistance = state.depthGridCells.mapNotNull { it.distanceMeters }.minOrNull()
+        val walkingSampleMinDistance = state.walkingZoneDepthSamples.mapNotNull { it.distanceMeters }.minOrNull()
+        Text(
+            "Alert/Beep ${state.collisionDistanceMeters?.let(::formatMetersShort) ?: "-"}  UI ${feedbackState.distanceMeters?.let(::formatMetersShort) ?: "-"}",
+            color = Color(0xFFFFE08B),
+        )
+        Text(
+            "Lane near L ${state.leftDistanceMeters?.let(::formatMetersShort) ?: "-"} / C ${state.centerDistanceMeters?.let(::formatMetersShort) ?: "-"} / R ${state.rightDistanceMeters?.let(::formatMetersShort) ?: "-"}",
+            color = Color(0xFFD9E2EA),
+        )
+        Text(
+            "Raw 4x4 min ${rawGridMinDistance?.let(::formatMetersShort) ?: "-"}  Walk min ${walkingSampleMinDistance?.let(::formatMetersShort) ?: "-"}",
+            color = Color(0xFFD9E2EA),
         )
         Text(
             "Move ${state.motionMetersPerSecond?.let(::formatSpeed) ?: "-"}  Close ${state.approachSpeedMetersPerSecond?.let(::formatSpeed) ?: "-"}  TTC ${state.timeToCollisionSeconds?.let(::formatSeconds) ?: "-"}",
@@ -1598,13 +1960,35 @@ private fun ConfidenceBar(
     }
 }
 
-private fun presentableRisk(riskLabel: String): Pair<String, Color> {
+private fun presentableRisk(
+    riskLabel: String,
+    language: WalkAssistLanguage = WalkAssistLanguage.KO,
+): Pair<String, Color> {
     return when (riskLabel) {
-        "critical" -> "위험" to Color(0xFFFF8E8E)
-        "high" -> "경고" to Color(0xFFFFC870)
-        "watch" -> "주의" to Color(0xFFFFDB7A)
-        "stable" -> "안전" to Color(0xFF96E2B5)
-        else -> "주의" to Color(0xFFD8E3EE)
+        "critical" -> (if (language == WalkAssistLanguage.EN) "Danger" else "위험") to Color(0xFFFF8E8E)
+        "high" -> (if (language == WalkAssistLanguage.EN) "Warning" else "경고") to Color(0xFFFFC870)
+        "watch" -> (if (language == WalkAssistLanguage.EN) "Caution" else "주의") to Color(0xFFFFDB7A)
+        "stable" -> (if (language == WalkAssistLanguage.EN) "Safe" else "안전") to Color(0xFF96E2B5)
+        else -> (if (language == WalkAssistLanguage.EN) "Caution" else "주의") to Color(0xFFD8E3EE)
+    }
+}
+
+private fun presentableArGuidance(
+    guidanceLabel: String,
+    language: WalkAssistLanguage,
+): String {
+    if (language == WalkAssistLanguage.KO) return guidanceLabel
+
+    return when {
+        guidanceLabel.contains("안전") -> "Path ahead is clear."
+        guidanceLabel.contains("왼쪽") || guidanceLabel.contains("좌측") -> "Move left."
+        guidanceLabel.contains("오른쪽") || guidanceLabel.contains("우측") -> "Move right."
+        guidanceLabel.contains("중앙") -> "Keep center."
+        guidanceLabel.contains("정지") || guidanceLabel.contains("멈") -> "Stop and check your surroundings."
+        guidanceLabel.contains("주의") -> "Check the path ahead."
+        guidanceLabel.contains("위험") -> "Obstacle ahead."
+        guidanceLabel.isBlank() -> "Scanning surroundings."
+        else -> guidanceLabel
     }
 }
 
@@ -1779,8 +2163,15 @@ private fun formatSpeed(speedMetersPerSecond: Float): String {
     return String.format("%.2f m/s", speedMetersPerSecond)
 }
 
-private fun formatSeconds(seconds: Float): String {
-    return String.format("%.1f초", seconds)
+private fun formatSeconds(
+    seconds: Float,
+    language: WalkAssistLanguage = WalkAssistLanguage.KO,
+): String {
+    return if (language == WalkAssistLanguage.EN) {
+        String.format("%.1fs", seconds)
+    } else {
+        String.format("%.1f초", seconds)
+    }
 }
 
 private fun formatMapScore(score: Float): String {

@@ -28,6 +28,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.example.walkassist.BuildConfig
 import com.example.walkassist.R
+import com.example.walkassist.feedback.core.FeedbackPolicy
+import com.example.walkassist.feedback.core.NavigationFeedbackKind
+import com.example.walkassist.feedback.runtime.FeedbackManager
 import com.naver.maps.geometry.LatLng
 import com.naver.maps.geometry.LatLngBounds
 import com.naver.maps.map.CameraAnimation
@@ -60,7 +63,8 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
 
     private lateinit var locationSource: FusedLocationSource
     private lateinit var repository: TMapRepository
-    private lateinit var voiceAnnouncer: RouteVoiceAnnouncer
+    private lateinit var feedbackManager: FeedbackManager
+    private val feedbackPolicy = FeedbackPolicy()
     private lateinit var stepAdapter: ArrayAdapter<String>
     private lateinit var sensorManager: SensorManager
     private var rotationVectorSensor: Sensor? = null
@@ -87,7 +91,11 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
         val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
             permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
         if (!granted) {
-            voiceAnnouncer.speak("위치 권한이 없어 지도 길찾기를 사용할 수 없습니다.")
+            speakNavigation(
+                message = "위치 권한이 없어 지도 길찾기를 사용할 수 없습니다.",
+                kind = NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+                discriminator = "permission_denied",
+            )
         }
     }
 
@@ -96,7 +104,7 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
         setContentView(R.layout.activity_map_navigation)
 
         repository = TMapRepository(apiKey = BuildConfig.TMAP_API_KEY)
-        voiceAnnouncer = RouteVoiceAnnouncer(this)
+        feedbackManager = FeedbackManager(this)
         locationSource = FusedLocationSource(this, LOCATION_PERMISSION_REQUEST_CODE)
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
@@ -108,7 +116,11 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
                 CameraUpdate.scrollAndZoomTo(point.location, GUIDE_ZOOM)
                     .animate(CameraAnimation.Fly, CAMERA_ANIMATION_DURATION_MS),
             )
-            voiceAnnouncer.speak(point.description)
+            speakNavigation(
+                message = point.description,
+                kind = NavigationFeedbackKind.ROUTE_POINT_INFO,
+                discriminator = "step_$position",
+            )
         }
 
         NaverMapSdk.getInstance(this).onAuthFailedListener =
@@ -155,7 +167,11 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
         searchButton.setOnClickListener {
             val destinationText = destinationInput.text.toString().trim()
             if (destinationText.isBlank()) {
-                voiceAnnouncer.speak("목적지를 입력해 주세요.")
+                speakNavigation(
+                    message = "목적지를 입력해 주세요.",
+                    kind = NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+                    discriminator = "empty_destination",
+                )
                 return@setOnClickListener
             }
             hideKeyboard(destinationInput)
@@ -196,19 +212,31 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
         lifecycleScope.launch {
             val destination = geocode(destinationText)
             if (destination == null) {
-                voiceAnnouncer.speak("목적지를 찾을 수 없습니다.")
+                speakNavigation(
+                    message = "목적지를 찾을 수 없습니다.",
+                    kind = NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+                    discriminator = "destination_not_found",
+                )
                 return@launch
             }
 
             val start = map.locationOverlay.position
             if (!start.isCoordinateReady()) {
-                voiceAnnouncer.speak("현재 위치를 확인할 수 없습니다.")
+                speakNavigation(
+                    message = "현재 위치를 확인할 수 없습니다.",
+                    kind = NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+                    discriminator = "location_not_ready",
+                )
                 return@launch
             }
 
             destinationMarker.position = destination
             destinationMarker.map = map
-            voiceAnnouncer.speak("보행자 경로를 검색합니다.")
+            speakNavigation(
+                message = "보행자 경로를 검색합니다.",
+                kind = NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+                discriminator = "searching",
+            )
 
             repository.fetchPedestrianRoute(
                 startLongitude = start.longitude,
@@ -228,7 +256,11 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
                 }
                 .onFailure { error ->
                     Log.w(TAG, "Route search failed", error)
-                    voiceAnnouncer.speak("경로를 찾을 수 없습니다.")
+                    speakNavigation(
+                        message = "경로를 찾을 수 없습니다.",
+                        kind = NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+                        discriminator = "route_not_found",
+                    )
                 }
         }
     }
@@ -252,7 +284,11 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
         val map = naverMap ?: return
         val coords = route.points.map { LatLng(it.latitude, it.longitude) }
         if (coords.isEmpty()) {
-            voiceAnnouncer.speak("경로 좌표를 찾을 수 없습니다.")
+            speakNavigation(
+                message = "경로 좌표를 찾을 수 없습니다.",
+                kind = NavigationFeedbackKind.ROUTE_SEARCH_STATUS,
+                discriminator = "empty_route_coords",
+            )
             return
         }
 
@@ -308,9 +344,17 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
 
         val firstGuide = guidePoints.firstOrNull()?.description
         if (firstGuide != null) {
-            voiceAnnouncer.speak("안내를 시작합니다. 첫 번째 안내입니다. $firstGuide")
+            speakNavigation(
+                message = "안내를 시작합니다. 첫 번째 안내입니다. $firstGuide",
+                kind = NavigationFeedbackKind.ROUTE_START_END,
+                discriminator = "start_${destinationName.hashCode()}",
+            )
         } else {
-            voiceAnnouncer.speak("$destinationName 보행자 경로 안내를 시작합니다.")
+            speakNavigation(
+                message = "$destinationName 보행자 경로 안내를 시작합니다.",
+                kind = NavigationFeedbackKind.ROUTE_START_END,
+                discriminator = "start_${destinationName.hashCode()}",
+            )
         }
     }
 
@@ -331,7 +375,11 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
                 val currentTime = System.currentTimeMillis()
                 if (currentTime - lastDeviationAnnouncedTime > ROUTE_DEVIATION_COOLDOWN_MS) {
                     lastDeviationAnnouncedTime = currentTime
-                    voiceAnnouncer.speak("경로를 이탈했습니다. 가야 할 길을 다시 확인해 주세요.")
+                    speakNavigation(
+                        message = "경로를 이탈했습니다. 가야 할 길을 다시 확인해 주세요.",
+                        kind = NavigationFeedbackKind.ROUTE_DEVIATION,
+                        discriminator = "active",
+                    )
                 }
                 return
             }
@@ -339,9 +387,14 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
 
         updateRealityGuidance(currentLatLng)
 
-        for (point in guidePoints) {
+        for ((index, point) in guidePoints.withIndex()) {
             if (!point.isAnnounced && currentLatLng.distanceTo(point.location) <= GUIDE_ANNOUNCE_METERS) {
-                voiceAnnouncer.speak(point.description)
+                speakNavigation(
+                    message = point.description,
+                    kind = NavigationFeedbackKind.ROUTE_STEP,
+                    discriminator = "step_$index",
+                    distanceMeters = currentLatLng.distanceTo(point.location).toFloat(),
+                )
                 point.isAnnounced = true
                 break
             }
@@ -388,7 +441,12 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
 
         lastRealityAction = guidance.action
         lastRealityGuidanceSpokenTime = now
-        voiceAnnouncer.speak(guidance.message)
+        speakNavigation(
+            message = guidance.message,
+            kind = NavigationFeedbackKind.ROUTE_REALITY,
+            discriminator = guidance.action.name.lowercase(),
+            distanceMeters = guidance.distanceToNextGuideMeters?.toFloat(),
+        )
     }
 
     private fun getShortestDistanceToPath(point: LatLng, path: List<LatLng>): Double {
@@ -455,7 +513,11 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
         routePanel.visibility = View.GONE
         summaryView.visibility = View.GONE
         clearButton.visibility = View.GONE
-        voiceAnnouncer.speak("안내를 종료합니다.")
+        speakNavigation(
+            message = "안내를 종료합니다.",
+            kind = NavigationFeedbackKind.ROUTE_START_END,
+            discriminator = "stop",
+        )
     }
 
     private fun speakAddressAt(latLng: LatLng) {
@@ -468,8 +530,28 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
                         ?.getAddressLine(0)
                 }.getOrNull()
             }
-            voiceAnnouncer.speak(address ?: "선택한 위치의 주소를 찾을 수 없습니다.")
+            speakNavigation(
+                message = address ?: "선택한 위치의 주소를 찾을 수 없습니다.",
+                kind = NavigationFeedbackKind.ROUTE_POINT_INFO,
+                discriminator = "map_point",
+            )
         }
+    }
+
+    private fun speakNavigation(
+        message: String,
+        kind: NavigationFeedbackKind,
+        discriminator: String? = null,
+        distanceMeters: Float? = null,
+    ) {
+        feedbackManager.provideFeedback(
+            feedbackPolicy.navigationRequest(
+                message = message,
+                distanceMeters = distanceMeters,
+                kind = kind,
+                throttleKey = feedbackPolicy.navigationThrottleKey(kind, discriminator),
+            ),
+        )
     }
 
     private fun clearRoute() {
@@ -528,6 +610,11 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
         super.onPause()
     }
 
+    override fun onStop() {
+        feedbackManager.stopSpeech()
+        super.onStop()
+    }
+
     override fun onSensorChanged(event: SensorEvent) {
         if (event.sensor.type != Sensor.TYPE_ROTATION_VECTOR) return
         val rotationMatrix = FloatArray(9)
@@ -556,7 +643,7 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
     }
 
     override fun onDestroy() {
-        voiceAnnouncer.shutdown()
+        feedbackManager.release()
         super.onDestroy()
     }
 

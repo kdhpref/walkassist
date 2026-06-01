@@ -31,49 +31,46 @@ import java.util.Locale
 fun FeedbackOverlayCard(
     state: FeedbackUiState,
     modifier: Modifier = Modifier,
+    languageCode: String = "ko",
 ) {
+    val isEnglish = languageCode == "en"
     val labelAndColor: Pair<String, Color> = when (state.alertLevel) {
         FeedbackAlertLevel.SAFE -> {
-            "피드백 안전" to Color(0xFF96E2B5)
+            (if (isEnglish) "Feedback safe" else "피드백 안전") to Color(0xFF96E2B5)
         }
 
         FeedbackAlertLevel.CAUTION -> {
-            "피드백 주의" to Color(0xFFFFDB7A)
+            (if (isEnglish) "Feedback caution" else "피드백 주의") to Color(0xFFFFDB7A)
         }
 
         FeedbackAlertLevel.DANGER -> {
-            "피드백 위험" to Color(0xFFFF8E8E)
+            (if (isEnglish) "Feedback danger" else "피드백 위험") to Color(0xFFFF8E8E)
         }
     }
 
     val label = labelAndColor.first
     val targetColor = labelAndColor.second
-
-    // ── 추가: 위험도 전환 시 색상이 부드럽게 변하는 애니메이션 ──
     val animatedColor by animateColorAsState(
         targetValue = targetColor,
         animationSpec = tween(durationMillis = 300),
         label = "feedbackCardColor",
     )
 
-    // ── 추가: TalkBack 접근성 라벨 ──
-    // semantics.liveRegion(Assertive)를 쓰면
-    // 카드 내용이 변경될 때 TalkBack이 자동으로 변경사항을 읽어줌.
     val a11yLabel = buildString {
         append(label)
         append(". ")
-        append(presentableSensorStatus(state.sensorStatus))
+        append(presentableSensorStatus(state.sensorStatus, isEnglish))
 
         state.distanceMeters?.let { distance ->
-            append(". 거리 ")
+            append(if (isEnglish) ". Distance " else ". 거리 ")
             append(formatDistanceShort(distance))
         }
 
         if (state.crosswalkDetected) {
-            append(". 횡단보도 감지")
+            append(if (isEnglish) ". Crosswalk detected" else ". 횡단보도 감지")
         }
 
-        val directionText = presentableDirection(state.direction)
+        val directionText = presentableDirection(state.direction, isEnglish)
         if (directionText.isNotBlank()) {
             append(". ")
             append(directionText)
@@ -101,7 +98,11 @@ fun FeedbackOverlayCard(
         Spacer(modifier = Modifier.height(4.dp))
 
         Text(
-            text = "TTS/진동 ${presentableSensorStatus(state.sensorStatus)}",
+            text = if (isEnglish) {
+                "Voice/haptic ${presentableSensorStatus(state.sensorStatus, isEnglish)}"
+            } else {
+                "TTS/진동 ${presentableSensorStatus(state.sensorStatus, isEnglish)}"
+            },
             color = Color.White,
             fontSize = 12.sp,
         )
@@ -109,25 +110,27 @@ fun FeedbackOverlayCard(
         state.distanceMeters?.let { distance ->
             Spacer(modifier = Modifier.height(3.dp))
             Text(
-                text = "기준 거리 ${formatDistanceShort(distance)}",
+                text = if (isEnglish) {
+                    "Distance ${formatDistanceShort(distance)}"
+                } else {
+                    "기준 거리 ${formatDistanceShort(distance)}"
+                },
                 color = Color(0xFFD8E3EE),
                 fontSize = 12.sp,
             )
         }
 
-        // ── 추가: 횡단보도 감지 표시 ──
         if (state.crosswalkDetected) {
             Spacer(modifier = Modifier.height(3.dp))
             Text(
-                text = "횡단보도 감지됨",
+                text = if (isEnglish) "Crosswalk detected" else "횡단보도 감지됨",
                 color = Color(0xFFB6E7FF),
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
             )
         }
 
-        // ── 추가: 방향 안내 표시 ──
-        val directionText = presentableDirection(state.direction)
+        val directionText = presentableDirection(state.direction, isEnglish)
         if (directionText.isNotBlank()) {
             Spacer(modifier = Modifier.height(3.dp))
             Text(
@@ -141,49 +144,26 @@ fun FeedbackOverlayCard(
 
 private fun presentableSensorStatus(
     status: FeedbackSensorStatus,
+    isEnglish: Boolean,
 ): String {
     return when (status) {
-        FeedbackSensorStatus.WAITING -> {
-            "대기"
-        }
-
-        FeedbackSensorStatus.CONNECTED -> {
-            "연결"
-        }
-
-        FeedbackSensorStatus.DISCONNECTED -> {
-            "끊김"
-        }
-
-        FeedbackSensorStatus.ERROR -> {
-            "오류"
-        }
+        FeedbackSensorStatus.WAITING -> if (isEnglish) "waiting" else "대기"
+        FeedbackSensorStatus.CONNECTED -> if (isEnglish) "connected" else "연결"
+        FeedbackSensorStatus.DISCONNECTED -> if (isEnglish) "disconnected" else "끊김"
+        FeedbackSensorStatus.ERROR -> if (isEnglish) "error" else "오류"
     }
 }
 
 private fun presentableDirection(
     direction: String,
+    isEnglish: Boolean,
 ): String {
     return when (direction.lowercase(Locale.KOREA)) {
-        "left" -> {
-            "← 왼쪽 이동"
-        }
-
-        "right" -> {
-            "→ 오른쪽 이동"
-        }
-
-        "center" -> {
-            "↑ 정면 통행"
-        }
-
-        "blocked" -> {
-            "✋ 정지 필요"
-        }
-
-        else -> {
-            ""
-        }
+        "left" -> if (isEnglish) "← move left" else "← 왼쪽 이동"
+        "right" -> if (isEnglish) "→ move right" else "→ 오른쪽 이동"
+        "center" -> if (isEnglish) "↑ go straight" else "↑ 정면 통행"
+        "blocked" -> if (isEnglish) "✋ stop" else "✋ 정지 필요"
+        else -> ""
     }
 }
 
