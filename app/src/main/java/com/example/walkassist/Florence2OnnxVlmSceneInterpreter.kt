@@ -30,6 +30,7 @@ class Florence2OnnxVlmSceneInterpreter(
         frame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
         crosswalk: CrosswalkPatternResult,
+        outputLanguageCode: String,
     ): VlmSceneInterpretation? {
         if (frame.requestMode != VlmRequestMode.MANUAL) {
             return null

@@ -93,6 +93,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToLong
@@ -111,11 +112,14 @@ class MainActivity : AppCompatActivity() {
     private var lastLowDistanceConfidenceAnnouncementAtMs = 0L
     private var awaitingDistanceConfidenceRecoveryAnnouncement = false
     private var lastLocalMapObstaclePulseAtMs = 0L
+    private var currentAppLanguage = WalkAssistLanguage.KO
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureFullscreenCutout()
         feedbackManager = FeedbackManager(this)
+        currentAppLanguage = WalkAssistLanguage.fromCode(WalkAssistSettings.appLanguageCode(this))
+        feedbackManager.setSpeechLocale(currentAppLanguage.ttsLocale)
         if (!intent.getBooleanExtra(ArCoreReplayController.EXTRA_RECORD_ON_START, false) &&
             intent.getStringExtra(ArCoreReplayController.EXTRA_PLAYBACK_DATASET_URI).isNullOrBlank()
         ) {
@@ -176,6 +180,7 @@ class MainActivity : AppCompatActivity() {
                         onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
                         onDebugVisualizationChanged = ::setDebugVisualizationVisible,
                         onDebugFlagsPersisted = ::persistDebugPipelineFlags,
+                        onLanguageChanged = ::updateAppLanguage,
                     )
                 }
             }
@@ -196,19 +201,34 @@ class MainActivity : AppCompatActivity() {
             .getStringExtra(ArCoreReplayController.EXTRA_PLAYBACK_DATASET_URI)
             ?.takeIf { it.isNotBlank() }
             ?.let(android.net.Uri::parse)
+        fragment.outputLanguageCode = currentAppLanguage.code
         fragment.onOneShotOcrResult = { message ->
-            feedbackManager.provideFeedback(
-                feedbackPolicy.ocrRequest(message)
-            )
+            lifecycleScope.launch {
+                val spokenMessage = outputMessageForLanguage(
+                    message = message,
+                    contextLabel = "OCR result",
+                    fallbackPrefix = "Recognized text",
+                )
+                feedbackManager.provideFeedback(
+                    feedbackPolicy.ocrRequest(spokenMessage)
+                )
+            }
         }
         fragment.onOneShotVlmResult = { message ->
-            feedbackManager.provideFeedback(
-                userRequestedFeedbackRequest(
+            lifecycleScope.launch {
+                val spokenMessage = outputMessageForLanguage(
                     message = message,
-                    throttleKey = "vlm:manual_result",
-                ),
-                queueSpeech = true,
-            )
+                    contextLabel = "camera scene description",
+                    fallbackPrefix = "Scene result",
+                )
+                feedbackManager.provideFeedback(
+                    userRequestedFeedbackRequest(
+                        message = spokenMessage,
+                        throttleKey = "vlm:manual_result",
+                    ),
+                    queueSpeech = true,
+                )
+            }
         }
     }
 
@@ -391,7 +411,10 @@ class MainActivity : AppCompatActivity() {
                         if (feedbackState.shouldAnnounce) {
                             if (WalkAssistSettings.isArcoreTtsEnabled(this@MainActivity)) {
                                 feedbackManager.provideFeedback(
-                                    message = feedbackState.message,
+                                    message = ttsFeedbackMessage(
+                                        feedbackState = feedbackState,
+                                        language = currentAppLanguage,
+                                    ),
                                     level = feedbackState.alertLevel,
                                 )
                             }
@@ -448,6 +471,27 @@ class MainActivity : AppCompatActivity() {
         if (!awaitingDistanceConfidenceRecoveryAnnouncement) return
 
         awaitingDistanceConfidenceRecoveryAnnouncement = false
+    }
+
+    private fun updateAppLanguage(language: WalkAssistLanguage) {
+        currentAppLanguage = language
+        WalkAssistSettings.setAppLanguageCode(this, language.code)
+        feedbackManager.setSpeechLocale(language.ttsLocale)
+        arFragment?.outputLanguageCode = language.code
+    }
+
+    private suspend fun outputMessageForLanguage(
+        message: String,
+        contextLabel: String,
+        fallbackPrefix: String,
+    ): String {
+        if (currentAppLanguage == WalkAssistLanguage.KO) return message
+        return withContext(Dispatchers.IO) {
+            GeminiTextTranslator.translateToEnglishOrNull(
+                text = message,
+                contextLabel = contextLabel,
+            ) ?: "$fallbackPrefix: $message"
+        }
     }
 
     private fun lowPriorityStatusRequest(
@@ -659,8 +703,8 @@ class MainActivity : AppCompatActivity() {
         private const val LOW_DISTANCE_CONFIDENCE_MESSAGE =
             "거리 신뢰도값이 낮음. 바닥과 주변 경계를 인식할 수 있도록 천천히 카메라를 움직여주세요."
         private const val LOCAL_MAP_WATCH_OBSTACLE_METERS = 3.0f
-        private const val LOCAL_MAP_CRITICAL_OBSTACLE_METERS = 0.7f
-        private const val LOCAL_MAP_FASTEST_PULSE_INTERVAL_MS = 500L
+        private const val LOCAL_MAP_CRITICAL_OBSTACLE_METERS = 0.5f
+        private const val LOCAL_MAP_FASTEST_PULSE_INTERVAL_MS = 400L
         private const val LOCAL_MAP_SLOWEST_PULSE_INTERVAL_MS = 2_000L
     }
 }
@@ -676,12 +720,15 @@ private fun WalkAssistRootOverlay(
     onPlaneMeshDebugChanged: (Boolean) -> Unit,
     onDebugVisualizationChanged: (Boolean) -> Unit,
     onDebugFlagsPersisted: (DebugPipelineFlags) -> Unit,
+    onLanguageChanged: (WalkAssistLanguage) -> Unit,
 ) {
     var cameraUiVisible by remember { mutableStateOf(false) }
-    var appLanguage by remember { mutableStateOf(WalkAssistLanguage.KO) }
-    val uiText = walkAssistUiText(appLanguage)
     var replayState by remember { mutableStateOf(ArCoreReplayController.currentState()) }
     val context = LocalContext.current
+    var appLanguage by remember {
+        mutableStateOf(WalkAssistLanguage.fromCode(WalkAssistSettings.appLanguageCode(context)))
+    }
+    val uiText = walkAssistUiText(appLanguage)
     var debugFlags by remember { mutableStateOf(WalkAssistSettings.debugPipelineFlags(context)) }
     val resourceMonitor = remember(context) { ResourceMonitor(context.applicationContext) }
     var resourceUsage by remember { mutableStateOf(ResourceUsageSnapshot()) }
@@ -697,6 +744,9 @@ private fun WalkAssistRootOverlay(
             delay(2_000L)
         }
     }
+    LaunchedEffect(appLanguage) {
+        onLanguageChanged(appLanguage)
+    }
     DisposableEffect(Unit) {
         val listener: (ArCoreReplayUiState) -> Unit = { replayState = it }
         ArCoreReplayController.addListener(listener)
@@ -704,7 +754,10 @@ private fun WalkAssistRootOverlay(
     }
     val openMapNavigation = {
         onMapOpening()
-        context.startActivity(Intent(context, MapNavigationActivity::class.java))
+        context.startActivity(
+            Intent(context, MapNavigationActivity::class.java)
+                .putExtra(MapNavigationActivity.EXTRA_APP_LANGUAGE_CODE, appLanguage.code)
+        )
     }
     val openSettings = {
         context.startActivity(Intent(context, GuideSettingsActivity::class.java))
@@ -1127,8 +1180,20 @@ private data class GuidePalette(
 
 private enum class WalkAssistLanguage(val code: String) {
     KO("ko"),
-    EN("en"),
+    EN("en");
+
+    companion object {
+        fun fromCode(code: String): WalkAssistLanguage {
+            return if (code.equals(EN.code, ignoreCase = true)) EN else KO
+        }
+    }
 }
+
+private val WalkAssistLanguage.ttsLocale: Locale
+    get() = when (this) {
+        WalkAssistLanguage.KO -> Locale.KOREAN
+        WalkAssistLanguage.EN -> Locale.US
+    }
 
 private fun WalkAssistLanguage.toggle(): WalkAssistLanguage {
     return if (this == WalkAssistLanguage.KO) WalkAssistLanguage.EN else WalkAssistLanguage.KO
@@ -1229,6 +1294,56 @@ private fun presentableFeedbackMessage(
             FeedbackAlertLevel.DANGER -> englishDirectionMessage(feedbackState.direction)
                 ?: "Obstacle ahead. Stop and check your surroundings."
         }
+    }
+}
+
+private fun ttsFeedbackMessage(
+    feedbackState: FeedbackUiState,
+    language: WalkAssistLanguage,
+): String {
+    if (language == WalkAssistLanguage.KO) return feedbackState.message
+
+    return when (feedbackState.sensorStatus) {
+        FeedbackSensorStatus.WAITING -> "Collecting spatial information."
+        FeedbackSensorStatus.DISCONNECTED -> "Sensor data is temporarily disconnected."
+        FeedbackSensorStatus.ERROR -> "A spatial recognition problem occurred."
+        FeedbackSensorStatus.CONNECTED -> englishObstacleSpeech(feedbackState)
+    }
+}
+
+private fun englishObstacleSpeech(feedbackState: FeedbackUiState): String {
+    val distance = feedbackState.distanceMeters?.let { " at ${formatMetersForEnglishSpeech(it)}" }.orEmpty()
+    val direction = englishDirectionSpeech(feedbackState.direction)
+
+    return when (feedbackState.alertLevel) {
+        FeedbackAlertLevel.SAFE -> "Path ahead is clear."
+        FeedbackAlertLevel.CAUTION -> listOfNotNull(
+            "Obstacle ahead$distance.",
+            direction,
+        ).joinToString(" ")
+        FeedbackAlertLevel.DANGER -> listOfNotNull(
+            "Obstacle ahead$distance.",
+            "Stop and check your surroundings.",
+            direction,
+        ).joinToString(" ")
+    }
+}
+
+private fun englishDirectionSpeech(direction: String): String? {
+    return when (direction.lowercase()) {
+        "left" -> "Move left."
+        "right" -> "Move right."
+        "center" -> "Keep center."
+        "blocked", "stop_or_sidestep" -> "Stop or sidestep if needed."
+        else -> null
+    }
+}
+
+private fun formatMetersForEnglishSpeech(distanceMeters: Float): String {
+    return if (distanceMeters < 1f) {
+        "${(distanceMeters * 100f).toInt()} centimeters"
+    } else {
+        String.format(Locale.US, "%.1f meters", distanceMeters)
     }
 }
 
@@ -1344,11 +1459,6 @@ private fun MeasurementOverlay(
                 .padding(horizontal = 14.dp, vertical = 14.dp),
         ) {
             val (riskText, riskColor) = presentableRisk(state.riskLabel, language)
-            val confidenceColor = when {
-                state.sensingConfidenceScore >= 80 -> Color(0xFF96E2B5)
-                state.sensingConfidenceScore >= 55 -> Color(0xFFFFDB7A)
-                else -> Color(0xFFFFA0A0)
-            }
 
             Text(
                 text = "WalkAssist",
@@ -1385,21 +1495,6 @@ private fun MeasurementOverlay(
                     )
                 }
             }
-            Spacer(modifier = Modifier.height(12.dp))
-            ConfidenceBar(
-                score = state.sensingConfidenceScore,
-                color = confidenceColor,
-            )
-            Spacer(modifier = Modifier.height(10.dp))
-            Text(
-                text = if (language == WalkAssistLanguage.EN) {
-                    "Spatial confidence ${state.sensingConfidenceScore}"
-                } else {
-                    "공간 인식 신뢰도 ${state.sensingConfidenceScore}점"
-                },
-                color = confidenceColor,
-                fontSize = 13.sp,
-            )
             state.timeToCollisionSeconds?.takeIf { state.riskLabel != "stable" }?.let { ttc ->
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -1936,26 +2031,6 @@ private fun CompactWorldMapOverlay(
             modifier = Modifier
                 .width(108.dp)
                 .height(108.dp),
-        )
-    }
-}
-
-@Composable
-private fun ConfidenceBar(
-    score: Int,
-    color: Color,
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(8.dp)
-            .background(Color(0x333E4A57), RoundedCornerShape(999.dp)),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth((score.coerceIn(0, 100) / 100f).coerceAtLeast(0.04f))
-                .height(8.dp)
-                .background(color, RoundedCornerShape(999.dp)),
         )
     }
 }

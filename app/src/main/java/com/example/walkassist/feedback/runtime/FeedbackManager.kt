@@ -13,6 +13,7 @@ import com.example.walkassist.feedback.core.FeedbackRequest
 import com.example.walkassist.feedback.core.FeedbackSource
 import com.example.walkassist.feedback.core.FeedbackThresholds
 import com.example.walkassist.feedback.core.HapticStrength
+import java.util.Locale
 
 class FeedbackManager(context: Context) {
     private val accessibilityAnnouncer = AccessibilityAnnouncer(context)
@@ -20,6 +21,12 @@ class FeedbackManager(context: Context) {
     private val speechController = acquireSpeechController(context.applicationContext)
     private val toneGenerator = ToneGenerator(AudioManager.STREAM_NOTIFICATION, TONE_VOLUME_PERCENT)
     private var prioritySpeechProtectedUntilMs = 0L
+    private var speechLocale: Locale = Locale.KOREAN
+
+    fun setSpeechLocale(locale: Locale) {
+        speechLocale = locale
+        speechController.setLanguage(locale)
+    }
 
     fun provideFeedback(
         request: FeedbackRequest,
@@ -118,8 +125,9 @@ class FeedbackManager(context: Context) {
         message: String,
         level: FeedbackAlertLevel,
     ) {
+        val spokenMessage = localizedSpeechMessage(message)
         speechController.speak(
-            message = message,
+            message = spokenMessage,
             level = level,
             queueMode = TextToSpeech.QUEUE_ADD,
             priority = 3,
@@ -152,15 +160,18 @@ class FeedbackManager(context: Context) {
         interruptCurrent: Boolean,
         queueSpeech: Boolean = false,
     ) {
+        val spokenMessage = localizedSpeechMessage(message)
+        if (spokenMessage.isBlank()) return
+
         if (
             isSpatialScanningMessage(message) &&
-            speechController.isSpeakingOrPending(message)
+            speechController.isSpeakingOrPending(spokenMessage)
         ) {
             Log.d(TAG, "Skipping duplicate spatial scanning speech")
             return
         }
 
-        val announcedByTalkBack = accessibilityAnnouncer.announce(message, announcementView)
+        val announcedByTalkBack = accessibilityAnnouncer.announce(spokenMessage, announcementView)
         if (announcedByTalkBack) return
 
         val now = SystemClock.elapsedRealtime()
@@ -178,7 +189,7 @@ class FeedbackManager(context: Context) {
         }
         if (queueSpeech) {
             speechController.speak(
-                message = message,
+                message = spokenMessage,
                 level = level,
                 queueMode = TextToSpeech.QUEUE_ADD,
                 priority = priority,
@@ -189,7 +200,7 @@ class FeedbackManager(context: Context) {
         if (shouldInterruptCurrent) {
             prioritySpeechProtectedUntilMs = now + PRIORITY_SPEECH_PROTECTION_MS
             speechController.speak(
-                message = message,
+                message = spokenMessage,
                 level = level,
                 queueMode = TextToSpeech.QUEUE_FLUSH,
                 priority = priority,
@@ -203,11 +214,29 @@ class FeedbackManager(context: Context) {
         }
 
         speechController.speak(
-            message = message,
+            message = spokenMessage,
             level = level,
             queueMode = TextToSpeech.QUEUE_FLUSH,
             priority = priority,
         )
+    }
+
+    private fun localizedSpeechMessage(message: String): String {
+        if (speechLocale.language != Locale.ENGLISH.language) return message
+
+        return when {
+            message.contains("문자 인식 준비") -> "Text recognition is getting ready."
+            message.contains("문자 인식을 시작") -> "Starting text recognition."
+            message.contains("장면 분석을 준비") -> "Scene analysis is getting ready. Please try again shortly."
+            message.contains("보행 가능 방향 확인 필요") -> "Check the safe walking direction."
+            message.contains("왼쪽 공간 확보") -> "There is space on the left."
+            message.contains("오른쪽 공간 확보") -> "There is space on the right."
+            message.contains("전방 공간 확보") -> "There is space ahead."
+            message.contains("공간 확보 안됨") -> "No clear space ahead. Stop and check the safe walking direction."
+            message.contains("거리 신뢰도") -> "Distance confidence is low. Move the camera slowly so the floor and nearby edges can be recognized."
+            message.contains("디버그 설정") -> "The VLM pipeline is turned off in debug settings."
+            else -> message
+        }
     }
 
     private fun shouldDropByThrottle(

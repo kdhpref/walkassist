@@ -233,6 +233,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var stableDirection = "searching"
     var onOneShotOcrResult: ((String) -> Unit)? = null
     var onOneShotVlmResult: ((String) -> Unit)? = null
+    var outputLanguageCode: String = "ko"
     var recordReplayOnSessionStart: Boolean = false
     var playbackDatasetUri: Uri? = null
     private var activeRecordingDatasetUri: Uri? = null
@@ -1785,6 +1786,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     frame = modelFrame,
                     primaryAnalysis = primaryAnalysis,
                     crosswalk = crosswalk,
+                    outputLanguageCode = outputLanguageCode,
                 )
                 val buttonToAnswerLatencyMs = SystemClock.elapsedRealtime() - requestedAtMs
                 Log.d(

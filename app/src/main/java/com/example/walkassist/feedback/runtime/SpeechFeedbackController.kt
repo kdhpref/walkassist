@@ -17,6 +17,7 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
         val message: String,
         val level: FeedbackAlertLevel,
         val queueMode: Int,
+        val priority: Int,
     )
 
     private val appContext = context.applicationContext
@@ -24,6 +25,7 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
     private var tts: TextToSpeech? = TextToSpeech(appContext, this)
     private var audioFocusRequest: AudioFocusRequest? = null
     private var isReady = false
+    private var speechLocale: Locale = Locale.KOREAN
     private var pendingSpeech: PendingSpeech? = null
     private val utteranceCounter = AtomicLong(0L)
     @Volatile
@@ -39,12 +41,7 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
             return
         }
 
-        val languageResult = tts?.setLanguage(Locale.KOREAN)
-        if (
-            languageResult == TextToSpeech.LANG_MISSING_DATA ||
-            languageResult == TextToSpeech.LANG_NOT_SUPPORTED
-        ) {
-            Log.e(TAG, "Korean TTS is not available")
+        if (!applySpeechLanguage(speechLocale)) {
             return
         }
 
@@ -82,7 +79,15 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
                 message = pending.message,
                 level = pending.level,
                 queueMode = pending.queueMode,
+                priority = pending.priority,
             )
+        }
+    }
+
+    fun setLanguage(locale: Locale) {
+        speechLocale = locale
+        if (isReady) {
+            applySpeechLanguage(locale)
         }
     }
 
@@ -94,12 +99,13 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
     ) {
         if (message.isBlank()) return
         if (!isReady) {
-            pendingSpeech = PendingSpeech(message, level, queueMode)
+            pendingSpeech = PendingSpeech(message, level, queueMode, priority)
             Log.d(TAG, "TTS not ready; queued pending speech")
             return
         }
 
         requestAudioFocus()
+        applySpeechLanguage(speechLocale)
         tts?.setPitch(pitchFor(level))
         tts?.setSpeechRate(rateFor(level))
 
@@ -193,6 +199,18 @@ class SpeechFeedbackController(context: Context) : TextToSpeech.OnInitListener {
             Log.e(TAG, "Audio focus abandon failed", error)
         }
         audioFocusRequest = null
+    }
+
+    private fun applySpeechLanguage(locale: Locale): Boolean {
+        val languageResult = tts?.setLanguage(locale)
+        val isUnavailable =
+            languageResult == TextToSpeech.LANG_MISSING_DATA ||
+                languageResult == TextToSpeech.LANG_NOT_SUPPORTED
+        if (isUnavailable) {
+            Log.e(TAG, "TTS language is not available: $locale")
+            return false
+        }
+        return true
     }
 
     private fun pitchFor(level: FeedbackAlertLevel): Float {

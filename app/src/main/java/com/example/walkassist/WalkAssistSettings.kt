@@ -13,8 +13,23 @@ object WalkAssistSettings {
     private const val KEY_DEBUG_LOCAL_MAP_ENABLED = "debug_local_map_enabled"
     private const val KEY_DEBUG_VLM_ENABLED = "debug_vlm_enabled"
     private const val KEY_VLM_MODEL_OPTION = "vlm_model_option"
+    private const val KEY_APP_LANGUAGE_CODE = "app_language_code"
 
     fun preferences(context: Context) = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
+
+    fun appLanguageCode(context: Context): String {
+        return preferences(context).getString(KEY_APP_LANGUAGE_CODE, "ko").orEmpty().ifBlank { "ko" }
+    }
+
+    fun setAppLanguageCode(
+        context: Context,
+        languageCode: String,
+    ) {
+        preferences(context)
+            .edit()
+            .putString(KEY_APP_LANGUAGE_CODE, languageCode)
+            .apply()
+    }
 
     fun vlmModelOption(context: Context): VlmModelOption {
         val storedValue = preferences(context).getString(KEY_VLM_MODEL_OPTION, "").orEmpty()

@@ -41,6 +41,7 @@ interface VlmSceneInterpreter {
         frame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
         crosswalk: CrosswalkPatternResult,
+        outputLanguageCode: String = "ko",
     ): VlmSceneInterpretation?
 
     fun close() = Unit
@@ -78,6 +79,7 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
         frame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
         crosswalk: CrosswalkPatternResult,
+        outputLanguageCode: String,
     ): VlmSceneInterpretation {
         val collisionDistance = primaryAnalysis.pathMetrics?.collisionDistanceMeters
             ?: primaryAnalysis.pathMetrics?.centerObstacleMeters
@@ -107,7 +109,7 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
                 VlmWalkingRisk.BLOCKED -> 0.66f
                 VlmWalkingRisk.UNKNOWN -> 0.35f
             },
-            pathSummary = buildFallbackSceneSummary(primaryAnalysis, crosswalk, risk),
+            pathSummary = buildFallbackSceneSummary(primaryAnalysis, crosswalk, risk, outputLanguageCode),
             evidence = buildList {
                 add("source=${frame.source.name.lowercase()}")
                 primaryAnalysis.pathMetrics?.pathClearMeters?.let { add("pathClear=${String.format("%.1f", it)}m") }
@@ -128,7 +130,34 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
         primaryAnalysis: FrameAnalysis,
         crosswalk: CrosswalkPatternResult,
         risk: VlmWalkingRisk,
+        outputLanguageCode: String,
     ): String {
+        if (outputLanguageCode == "en") {
+            val objectPhrases = primaryAnalysis.detections
+                .sortedWith(
+                    compareBy<DetectedObjectResult> { it.distanceEstimate.distanceMeters ?: Float.MAX_VALUE }
+                        .thenByDescending { it.confidence },
+                )
+                .take(4)
+                .map(::englishObjectScenePhrase)
+                .filter { it.isNotBlank() }
+            val visible = when {
+                objectPhrases.isNotEmpty() -> "Visible ahead: ${objectPhrases.joinToString(", ")}."
+                crosswalk.detected -> "A crosswalk pattern is visible on the floor ahead."
+                risk == VlmWalkingRisk.CLEAR -> "The walking space ahead appears mostly open."
+                risk == VlmWalkingRisk.CAUTION -> "There is something ahead that needs caution."
+                risk == VlmWalkingRisk.BLOCKED -> "The path ahead appears blocked."
+                else -> "The scene ahead is unclear."
+            }
+            val action = when (risk) {
+                VlmWalkingRisk.BLOCKED -> "Slow down and stop if needed."
+                VlmWalkingRisk.CAUTION -> "Move slowly."
+                VlmWalkingRisk.CLEAR -> "Continue forward slowly."
+                VlmWalkingRisk.UNKNOWN -> "Pause briefly."
+            }
+            return "$visible $action"
+        }
+
         val objectPhrases = primaryAnalysis.detections
             .sortedWith(
                 compareBy<DetectedObjectResult> { it.distanceEstimate.distanceMeters ?: Float.MAX_VALUE }
@@ -183,6 +212,23 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
             ?.let { " 약 ${formatMeters(it)} 앞" }
             .orEmpty()
         return "$lane${distance}에 $label"
+    }
+
+    private fun englishObjectScenePhrase(detection: DetectedObjectResult): String {
+        val label = detection.label.lowercase().replace('_', ' ')
+        if (label.isBlank()) return ""
+        val centerX = ((detection.boundingBox.left + detection.boundingBox.right) * 0.5f) /
+            detection.imageWidth.coerceAtLeast(1)
+        val lane = when {
+            centerX < 0.38f -> "left"
+            centerX > 0.62f -> "right"
+            else -> "center"
+        }
+        val distance = detection.distanceEstimate.distanceMeters
+            ?.takeIf { it > 0f && it < 20f }
+            ?.let { " ${formatMeters(it)} ahead" }
+            .orEmpty()
+        return "$label on the $lane$distance"
     }
 
     private fun formatMeters(distanceMeters: Float): String {

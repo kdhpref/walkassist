@@ -27,7 +27,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.example.walkassist.BuildConfig
+import com.example.walkassist.GeminiTextTranslator
 import com.example.walkassist.R
+import com.example.walkassist.WalkAssistSettings
 import com.example.walkassist.feedback.core.FeedbackPolicy
 import com.example.walkassist.feedback.core.NavigationFeedbackKind
 import com.example.walkassist.feedback.runtime.FeedbackManager
@@ -84,6 +86,8 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
     private var lastRealityAction: RouteCameraAction? = null
     private var lastDeviationAnnouncedTime = 0L
     private var lastRealityGuidanceSpokenTime = 0L
+    private var appLanguageCode: String = "ko"
+    private val englishNavigationCache = mutableMapOf<String, String>()
 
     private val locationPermissionRequest = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -105,6 +109,9 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
 
         repository = TMapRepository(apiKey = BuildConfig.TMAP_API_KEY)
         feedbackManager = FeedbackManager(this)
+        appLanguageCode = intent.getStringExtra(EXTRA_APP_LANGUAGE_CODE)
+            ?: WalkAssistSettings.appLanguageCode(this)
+        feedbackManager.setSpeechLocale(if (isEnglishMode()) Locale.US else Locale.KOREAN)
         locationSource = FusedLocationSource(this, LOCATION_PERMISSION_REQUEST_CODE)
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         rotationVectorSensor = sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
@@ -544,6 +551,37 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
         discriminator: String? = null,
         distanceMeters: Float? = null,
     ) {
+        if (isEnglishMode()) {
+            lifecycleScope.launch {
+                provideNavigationFeedback(
+                    message = englishNavigationMessage(
+                        message = message,
+                        kind = kind,
+                        discriminator = discriminator,
+                        distanceMeters = distanceMeters,
+                    ),
+                    kind = kind,
+                    discriminator = discriminator,
+                    distanceMeters = distanceMeters,
+                )
+            }
+            return
+        }
+
+        provideNavigationFeedback(
+            message = message,
+            kind = kind,
+            discriminator = discriminator,
+            distanceMeters = distanceMeters,
+        )
+    }
+
+    private fun provideNavigationFeedback(
+        message: String,
+        kind: NavigationFeedbackKind,
+        discriminator: String?,
+        distanceMeters: Float?,
+    ) {
         feedbackManager.provideFeedback(
             feedbackPolicy.navigationRequest(
                 message = message,
@@ -552,6 +590,84 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
                 throttleKey = feedbackPolicy.navigationThrottleKey(kind, discriminator),
             ),
         )
+    }
+
+    private suspend fun englishNavigationMessage(
+        message: String,
+        kind: NavigationFeedbackKind,
+        discriminator: String?,
+        distanceMeters: Float?,
+    ): String {
+        englishNavigationStatusMessage(kind, discriminator, distanceMeters)?.let { return it }
+
+        return englishNavigationCache[message] ?: withContext(Dispatchers.IO) {
+            GeminiTextTranslator.translateToEnglishOrNull(
+                text = message,
+                contextLabel = "pedestrian navigation instruction",
+            ) ?: fallbackEnglishNavigationMessage(kind)
+        }.also { translated ->
+            englishNavigationCache[message] = translated
+        }
+    }
+
+    private fun englishNavigationStatusMessage(
+        kind: NavigationFeedbackKind,
+        discriminator: String?,
+        distanceMeters: Float?,
+    ): String? {
+        return when {
+            discriminator == "permission_denied" -> "Location permission is required for route navigation."
+            discriminator == "empty_destination" -> "Please enter a destination."
+            discriminator == "destination_not_found" -> "Destination was not found."
+            discriminator == "location_not_ready" -> "Current location is not ready yet."
+            discriminator == "searching" -> "Searching for a walking route."
+            discriminator == "route_not_found" -> "No walking route was found."
+            discriminator == "empty_route_coords" -> "Route coordinates were not found."
+            discriminator == "stop" -> "Navigation stopped."
+            discriminator == "map_point" -> "Selected map point."
+            discriminator?.startsWith("start_") == true -> "Starting walking guidance."
+            kind == NavigationFeedbackKind.ROUTE_DEVIATION -> "You are off the route. Move back toward the route."
+            kind == NavigationFeedbackKind.ROUTE_ARRIVAL -> "You have arrived near the destination."
+            kind == NavigationFeedbackKind.ROUTE_REALITY -> englishRealityGuidance(discriminator, distanceMeters)
+            else -> null
+        }
+    }
+
+    private fun englishRealityGuidance(
+        discriminator: String?,
+        distanceMeters: Float?,
+    ): String? {
+        val base = when (discriminator?.uppercase(Locale.US)) {
+            RouteCameraAction.STRAIGHT.name -> "Continue in the direction you are facing."
+            RouteCameraAction.LEFT.name -> "Turn slightly left to align with the route."
+            RouteCameraAction.RIGHT.name -> "Turn slightly right to align with the route."
+            RouteCameraAction.TURN_AROUND.name -> "You are facing the opposite direction. Turn around."
+            RouteCameraAction.REJOIN_ROUTE.name -> "Move back toward the route."
+            RouteCameraAction.ARRIVED.name -> "You have arrived near the destination."
+            RouteCameraAction.WAITING.name -> "Checking camera direction."
+            else -> return null
+        }
+        val distance = distanceMeters
+            ?.takeIf { it.isFinite() && it > 0f }
+            ?.let { " Next guide point is about ${it.toInt()} meters away." }
+            .orEmpty()
+        return base + distance
+    }
+
+    private fun fallbackEnglishNavigationMessage(kind: NavigationFeedbackKind): String {
+        return when (kind) {
+            NavigationFeedbackKind.ROUTE_STEP -> "Continue to the next route instruction."
+            NavigationFeedbackKind.ROUTE_POINT_INFO -> "Route point selected."
+            NavigationFeedbackKind.ROUTE_SEARCH_STATUS -> "Navigation status changed."
+            NavigationFeedbackKind.ROUTE_START_END -> "Navigation updated."
+            NavigationFeedbackKind.ROUTE_DEVIATION -> "You are off the route."
+            NavigationFeedbackKind.ROUTE_REALITY -> "Follow the route direction."
+            NavigationFeedbackKind.ROUTE_ARRIVAL -> "You have arrived near the destination."
+        }
+    }
+
+    private fun isEnglishMode(): Boolean {
+        return appLanguageCode.equals("en", ignoreCase = true)
     }
 
     private fun clearRoute() {
@@ -648,6 +764,7 @@ class MapNavigationActivity : AppCompatActivity(), OnMapReadyCallback, SensorEve
     }
 
     companion object {
+        const val EXTRA_APP_LANGUAGE_CODE = "com.example.walkassist.APP_LANGUAGE_CODE"
         private const val TAG = "MapNavigationActivity"
         private const val LOCATION_PERMISSION_REQUEST_CODE = 1000
         private const val ROUTE_COLOR = 0xFF2583FF.toInt()

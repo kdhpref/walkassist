@@ -35,13 +35,14 @@ class GeminiVlmSceneInterpreter(
         frame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
         crosswalk: CrosswalkPatternResult,
+        outputLanguageCode: String,
     ): VlmSceneInterpretation? {
         if (frame.requestMode != VlmRequestMode.MANUAL || apiKey.isBlank()) {
             return null
         }
 
         val responseText = runCatching {
-            requestGeminiDescription(frame)
+            requestGeminiDescription(frame, outputLanguageCode)
         }.onFailure {
             Log.w(TAG, "Gemini VLM request failed", it)
         }.getOrNull()
@@ -63,7 +64,10 @@ class GeminiVlmSceneInterpreter(
         )
     }
 
-    private fun requestGeminiDescription(frame: SpatialFrame): String {
+    private fun requestGeminiDescription(
+        frame: SpatialFrame,
+        outputLanguageCode: String,
+    ): String {
         val connection = (URL("$API_BASE/models/$model:generateContent").openConnection() as HttpURLConnection)
         connection.requestMethod = "POST"
         connection.connectTimeout = 10_000
@@ -89,7 +93,7 @@ class GeminiVlmSceneInterpreter(
                                             .put("data", frame.bitmap.toBase64Jpeg()),
                                     ),
                                 )
-                                .put(JSONObject().put("text", GEMINI_IMAGE_DESCRIPTION_PROMPT)),
+                                .put(JSONObject().put("text", geminiImageDescriptionPrompt(outputLanguageCode))),
                         ),
                 ),
             )
@@ -187,10 +191,23 @@ class GeminiVlmSceneInterpreter(
         private const val DEFAULT_MODEL = "gemini-2.5-flash-lite"
         private const val MAX_IMAGE_SIDE = 640
         private const val JPEG_QUALITY = 72
-        private const val GEMINI_IMAGE_DESCRIPTION_PROMPT = """
+        private fun geminiImageDescriptionPrompt(outputLanguageCode: String): String {
+            return if (outputLanguageCode == "en") {
+                GEMINI_IMAGE_DESCRIPTION_PROMPT_EN
+            } else {
+                GEMINI_IMAGE_DESCRIPTION_PROMPT_KO
+            }
+        }
+
+        private const val GEMINI_IMAGE_DESCRIPTION_PROMPT_KO = """
 Describe only what is visible in the image.
 If readable signs or text are visible, summarize them naturally.
 Answer in Korean in no more than two short sentences.
+"""
+        private const val GEMINI_IMAGE_DESCRIPTION_PROMPT_EN = """
+Describe only what is visible in the image for a blind or low-vision pedestrian.
+If readable signs or text are visible, summarize them naturally in English.
+Answer in English in no more than two short sentences.
 """
         private val PRIVATE_HINT_TERMS = listOf(
             "yolo",
