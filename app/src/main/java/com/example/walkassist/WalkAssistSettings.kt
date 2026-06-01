@@ -12,24 +12,8 @@ object WalkAssistSettings {
     private const val KEY_DEBUG_LOCAL_MAP_ENABLED = "debug_local_map_enabled"
     private const val KEY_DEBUG_CROSSWALK_ENABLED = "debug_crosswalk_enabled"
     private const val KEY_DEBUG_VLM_ENABLED = "debug_vlm_enabled"
-    private const val KEY_VLM_MODEL_OPTION = "vlm_model_option"
 
     fun preferences(context: Context) = context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE)
-
-    fun vlmModelOption(context: Context): VlmModelOption {
-        val storedValue = preferences(context).getString(KEY_VLM_MODEL_OPTION, "").orEmpty()
-        return VlmModelOption.fromPreferenceValue(storedValue)
-    }
-
-    fun setVlmModelOption(
-        context: Context,
-        option: VlmModelOption,
-    ) {
-        preferences(context)
-            .edit()
-            .putString(KEY_VLM_MODEL_OPTION, option.preferenceValue)
-            .apply()
-    }
 
     fun isArcoreTtsEnabled(context: Context): Boolean {
         return preferences(context).getBoolean(KEY_ARCORE_TTS_ENABLED, true)

@@ -149,7 +149,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private val floorSegmenterDelegate = lazy { ModelFloorSegmenter(requireContext().applicationContext) }
     private val floorSegmenter by floorSegmenterDelegate
     private val crosswalkPatternDetector by lazy { CrosswalkPatternDetector() }
-    private val vlmSceneInterpreter by lazy { WalkAssistVlmFactory.create(requireContext().applicationContext) }
+    private val vlmSceneInterpreter by lazy { WalkAssistVlmFactory.create() }
     private val vlmInvocationPolicy = VlmInvocationPolicy()
     private var oneShotOcrReader: OneShotOcrReader? = null
     private val objectTracker = ObjectTracker()
@@ -179,7 +179,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var stableDirection = "searching"
     var onOneShotOcrResult: ((String) -> Unit)? = null
     var onOneShotVlmResult: ((String) -> Unit)? = null
-    var onLiveVlmStateChanged: ((Boolean) -> Unit)? = null
     var recordReplayOnSessionStart: Boolean = false
     var playbackDatasetUri: Uri? = null
     private var activeRecordingDatasetUri: Uri? = null
@@ -194,8 +193,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var viewportHeight = 1
     @Volatile
     private var oneShotVlmRequestedAtMs: Long = 0L
-    private val liveVlmSessionActive = AtomicBoolean(false)
-    private var lastLiveVlmFrameSentAtMs = 0L
 
     fun requestOneShotOcr() {
         if (oneShotOcrRequested.get() || oneShotOcrInFlight.get()) {
@@ -207,49 +204,12 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
     fun requestOneShotVlm() {
         Log.d(TAG, "VLM button requested")
-        if (WalkAssistSettings.vlmModelOption(requireContext().applicationContext) ==
-            VlmModelOption.GEMINI_3_1_FLASH_LIVE_API
-        ) {
-            toggleGeminiLiveSession()
-            return
-        }
         if (oneShotVlmRequested.get() || oneShotVlmInFlight.get()) {
             dispatchOneShotVlmResult("이미 앞쪽 장면을 분석 중입니다. 잠시만 기다려 주세요.")
             return
         }
         oneShotVlmRequestedAtMs = SystemClock.elapsedRealtime()
         oneShotVlmRequested.set(true)
-    }
-
-    private fun toggleGeminiLiveSession() {
-        if (liveVlmSessionActive.get()) {
-            vlmSceneInterpreter.stopLiveSession()
-            liveVlmSessionActive.set(false)
-            onLiveVlmStateChanged?.invoke(false)
-            dispatchOneShotVlmResult("Gemini Live session stopped.")
-            return
-        }
-
-        val started = vlmSceneInterpreter.startLiveSession(
-            onText = { message ->
-                if (message.isNotBlank()) {
-                    dispatchOneShotVlmResult(message)
-                }
-            },
-            onError = { message ->
-                liveVlmSessionActive.set(false)
-                onLiveVlmStateChanged?.invoke(false)
-                dispatchOneShotVlmResult("Gemini Live session failed. $message")
-            },
-        )
-        if (started) {
-            liveVlmSessionActive.set(true)
-            lastLiveVlmFrameSentAtMs = 0L
-            onLiveVlmStateChanged?.invoke(true)
-            dispatchOneShotVlmResult("Gemini Live session starting.")
-        } else {
-            dispatchOneShotVlmResult("Gemini Live session is not available.")
-        }
     }
 
     fun setPlaneMeshDebugVisible(visible: Boolean) {
@@ -309,11 +269,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     }
 
     override fun onPause() {
-        if (liveVlmSessionActive.get()) {
-            vlmSceneInterpreter.stopLiveSession()
-            liveVlmSessionActive.set(false)
-            onLiveVlmStateChanged?.invoke(false)
-        }
         arSession?.pause()
         glSurfaceView?.onPause()
         super.onPause()
@@ -432,7 +387,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         }
         detectorExecutor.shutdownNow()
         vlmExecutor.shutdownNow()
-        liveVlmSessionActive.set(false)
         vlmSceneInterpreter.close()
         oneShotOcrReader?.close()
         arSession?.close()
@@ -891,20 +845,17 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
         val ocrRequested = oneShotOcrRequested.get()
         val vlmRequested = oneShotVlmRequested.get()
-        val liveVlmStreaming = liveVlmSessionActive.get() && debugFlags.vlmEnabled
         val backgroundVisionEnabled = debugFlags.yoloEnabled ||
             debugFlags.floorSegmentationEnabled ||
             debugFlags.crosswalkEnabled
-        if (!backgroundVisionEnabled && !ocrRequested && !vlmRequested && !liveVlmStreaming) {
+        if (!backgroundVisionEnabled && !ocrRequested && !vlmRequested) {
             lastObjectDetections = emptyList()
             lastFloorMaskState = null
             lastCrosswalkState = null
             return
         }
         val now = SystemClock.elapsedRealtime()
-        val liveFrameDue = liveVlmStreaming && now - lastLiveVlmFrameSentAtMs >= LIVE_VLM_FRAME_INTERVAL_MS
-        if (!ocrRequested && !vlmRequested && !liveFrameDue && now - lastDetectionStartedAtMs < 450L) return
-        if (!ocrRequested && !vlmRequested && liveVlmStreaming && !liveFrameDue && !backgroundVisionEnabled) return
+        if (!ocrRequested && !vlmRequested && now - lastDetectionStartedAtMs < 450L) return
 
         val image = try {
             frame.acquireCameraImage()
@@ -925,15 +876,11 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             var ocrStarted = false
             var shouldRunVlm = false
             var vlmStarted = false
-            var shouldStreamLiveVlm = false
             try {
                 val bitmap = image.toUprightBitmap(rotationDegrees)
                 image.close()
                 shouldRunOcr = oneShotOcrRequested.getAndSet(false)
                 shouldRunVlm = oneShotVlmRequested.getAndSet(false)
-                shouldStreamLiveVlm = liveVlmSessionActive.get() &&
-                    debugFlags.vlmEnabled &&
-                    SystemClock.elapsedRealtime() - lastLiveVlmFrameSentAtMs >= LIVE_VLM_FRAME_INTERVAL_MS
                 if (shouldRunVlm && debugFlags.vlmEnabled) {
                     val vlmFrame = SpatialFrame(
                         bitmap = bitmap,
@@ -1041,10 +988,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                     arState = arStateSnapshot,
                     requestMode = if (shouldRunVlm) VlmRequestMode.MANUAL else VlmRequestMode.AUTO,
                 )
-                if (shouldStreamLiveVlm) {
-                    vlmSceneInterpreter.streamLiveFrame(spatialFrame)
-                    lastLiveVlmFrameSentAtMs = SystemClock.elapsedRealtime()
-                }
                 if (shouldRunVlm && debugFlags.vlmEnabled && !vlmStarted) {
                     startBackgroundVlmCaption(
                         bitmap = bitmap,
@@ -1144,7 +1087,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val requestedAtMs = oneShotVlmRequestedAtMs.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
         VlmInvocationLogger.append(
             context = appContext,
-            selectedModelName = WalkAssistSettings.vlmModelOption(appContext).displayName,
+            selectedModelName = WalkAssistVlmFactory.SELECTED_MODEL_DISPLAY_NAME,
             resultModelName = resultModelName,
             latencyMs = SystemClock.elapsedRealtime() - requestedAtMs,
             success = success,
@@ -1173,7 +1116,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             val requestedAtMs = oneShotVlmRequestedAtMs.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
             VlmInvocationLogger.append(
                 context = appContext,
-                selectedModelName = WalkAssistSettings.vlmModelOption(appContext).displayName,
+                selectedModelName = WalkAssistVlmFactory.SELECTED_MODEL_DISPLAY_NAME,
                 resultModelName = null,
                 latencyMs = SystemClock.elapsedRealtime() - requestedAtMs,
                 success = false,
@@ -1186,7 +1129,7 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val localVlmInterpreter = vlmSceneInterpreter
         val modelFrame = spatialFrame.copy(bitmap = vlmBitmap)
         val appContext = requireContext().applicationContext
-        val selectedModelName = WalkAssistSettings.vlmModelOption(appContext).displayName
+        val selectedModelName = WalkAssistVlmFactory.SELECTED_MODEL_DISPLAY_NAME
         val requestedAtMs = oneShotVlmRequestedAtMs.takeIf { it > 0L } ?: SystemClock.elapsedRealtime()
         vlmExecutor.execute {
             val inferenceStartedAtMs = SystemClock.elapsedRealtime()
@@ -2549,7 +2492,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
 
     companion object {
         private const val TAG = "WalkAssistVlm"
-        private const val LIVE_VLM_FRAME_INTERVAL_MS = 1_000L
         private val EMPTY_FRAME_ANALYSIS = FrameAnalysis(
             detections = emptyList(),
             nearestObstacle = null,

@@ -88,7 +88,6 @@ class MainActivity : AppCompatActivity() {
     private val arFeedbackMapper = ArFeedbackMapper()
     private lateinit var feedbackManager: FeedbackManager
     private var arFragment: WalkAssistArFragment? = null
-    private var liveVlmActive by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -139,7 +138,7 @@ class MainActivity : AppCompatActivity() {
                         feedbackState = feedbackState,
                         onOcrClick = ::requestOneShotOcr,
                         onVlmClick = ::requestOneShotVlm,
-                        vlmButtonText = liveVlmButtonText(),
+                        vlmButtonText = "VLM 시작",
                         onStopReplayRecording = ::stopArCoreReplayRecording,
                         onPlaneMeshDebugChanged = ::setPlaneMeshDebugVisible,
                     )
@@ -184,20 +183,17 @@ class MainActivity : AppCompatActivity() {
                 prioritySpeech = true,
             )
         }
-        fragment.onLiveVlmStateChanged = { active ->
-            liveVlmActive = active
-        }
     }
 
     private fun prepareVlmModelAtStartup() {
         lifecycleScope.launch(Dispatchers.IO) {
             val status = runCatching {
-                WalkAssistVlmFactory.prepareSelected(this@MainActivity)
+                WalkAssistVlmFactory.prepareSelected()
             }.onFailure {
                 Log.w(TAG, "VLM startup preparation failed", it)
             }.getOrElse {
                 VlmModelPreparationStatus(
-                    modelName = WalkAssistSettings.vlmModelOption(this@MainActivity).displayName,
+                    modelName = WalkAssistVlmFactory.SELECTED_MODEL_DISPLAY_NAME,
                     statusLabel = "unknown",
                     downloadState = null,
                     isAvailable = false,
@@ -263,11 +259,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         fragment.requestOneShotVlm()
-    }
-
-    private fun liveVlmButtonText(): String {
-        val isLiveModel = WalkAssistSettings.vlmModelOption(this) == VlmModelOption.GEMINI_3_1_FLASH_LIVE_API
-        return if (isLiveModel && liveVlmActive) "VLM 종료" else "VLM 시작"
     }
 
     private fun stopArCoreReplayRecording() {

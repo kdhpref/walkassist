@@ -43,17 +43,6 @@ interface VlmSceneInterpreter {
         crosswalk: CrosswalkPatternResult,
     ): VlmSceneInterpretation?
 
-    fun startLiveSession(
-        onText: (String) -> Unit,
-        onError: (String) -> Unit,
-    ): Boolean = false
-
-    fun streamLiveFrame(frame: SpatialFrame) = Unit
-
-    fun stopLiveSession() = Unit
-
-    fun isLiveSessionActive(): Boolean = false
-
     fun close() = Unit
 }
 

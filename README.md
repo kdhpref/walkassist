@@ -41,24 +41,11 @@ cmd /c gradlew.bat assembleDebug
 cmd /c gradlew.bat installDebug
 ```
 
-## VLM options
+## VLM model
 
-The VLM button uses the model selected in the app settings. Available choices are:
-
-- Gemini API
-- Gemini 3.1 Flash Live Preview
-- Florence-2 INT4 from `onnx-community/Florence-2-base-ft`
-- Florence-2 INT8 from `onnx-community/Florence-2-base-ft`
-
-Gemini sends the current camera image to the selected Gemini API option when
-the user presses the VLM button.
-
-When Gemini 3.1 Flash Live Preview is selected, the app runs a minimal Live API
-WebSocket demo: it opens the official `BidiGenerateContent` endpoint, sends the
-initial `setup` message with audio output transcription enabled, then sends the
-current camera image plus one short text turn through `clientContent`. It
-displays the returned output transcription, does not keep a continuous session
-open, and does not use the microphone.
+The VLM button uses `gemini-2.5-flash-lite` as the only scene interpretation
+model. When the user presses the VLM button, the app sends the current camera
+image to the Gemini API and reads the Korean walking-scene summary.
 
 Put the API key in `local.properties`:
 
@@ -68,13 +55,6 @@ GEMINI_API_KEY=your_gemini_api_key_here
 
 The key is exposed to the app through `BuildConfig.GEMINI_API_KEY`; do not put it
 in source-controlled Kotlin files.
-
-Florence-2 INT4 and INT8 assets are downloaded to the app external files model
-directory from the VLM settings screen. Desktop downloads can also be prepared with:
-
-```powershell
-python desktop_tools\florence2\download_onnx_community_assets.py --output-dir florence-2-base-ft
-```
 
 ## Next recommended work
 

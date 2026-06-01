@@ -18,20 +18,15 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.lifecycleScope
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class GuideSettingsActivity : AppCompatActivity() {
     private val preferences by lazy {
         WalkAssistSettings.preferences(this)
     }
     private var replayPickerDialog: AlertDialog? = null
-    private lateinit var vlmModelButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -68,13 +63,6 @@ class GuideSettingsActivity : AppCompatActivity() {
             textSize = 20f
             minHeight = 72
             setOnClickListener { showEmergencyContactDialog() }
-        }
-
-        vlmModelButton = Button(this).apply {
-            text = vlmModelButtonText()
-            textSize = 20f
-            minHeight = 72
-            setOnClickListener { showVlmModelSelectionDialog() }
         }
 
         val arcoreTtsButton = Button(this).apply {
@@ -146,7 +134,6 @@ class GuideSettingsActivity : AppCompatActivity() {
         root.addView(titleText, fullWidthParams())
         root.addView(descriptionText, fullWidthParams())
         root.addView(emergencyButton, fullWidthParams())
-        root.addView(vlmModelButton, fullWidthParams(topMargin = 18))
         root.addView(arcoreTtsButton, fullWidthParams(topMargin = 18))
         root.addView(arcoreRecordButton, fullWidthParams(topMargin = 18))
         root.addView(arcoreStorageText, fullWidthParams())
@@ -315,101 +302,6 @@ class GuideSettingsActivity : AppCompatActivity() {
     private fun formatSize(bytes: Long): String {
         val mb = bytes / (1024.0 * 1024.0)
         return String.format(Locale.KOREA, "%.1f MB", mb)
-    }
-
-    private fun vlmModelButtonText(): String {
-        val option = WalkAssistSettings.vlmModelOption(this)
-        val readiness = when (option) {
-            VlmModelOption.GEMINI_API,
-            VlmModelOption.GEMINI_3_1_FLASH_LIVE_API,
-            -> if (BuildConfig.GEMINI_API_KEY.isBlank()) {
-                "API key needed"
-            } else {
-                "ready"
-            }
-            VlmModelOption.FLORENCE2_INT4,
-            VlmModelOption.FLORENCE2_INT8,
-            -> option.florenceVariant
-                ?.let { Florence2ModelStore.localStatus(this, it) }
-                ?.let { if (it.isAvailable) "downloaded" else "missing ${it.missingFiles.size}" }
-                ?: "missing"
-        }
-        return "VLM: ${option.displayName} ($readiness)"
-    }
-
-    private fun showVlmModelSelectionDialog() {
-        val options = VlmModelOption.values()
-        var selectedIndex = options.indexOf(WalkAssistSettings.vlmModelOption(this)).coerceAtLeast(0)
-        val labels = options.map { option ->
-            when (option) {
-                VlmModelOption.GEMINI_API,
-                VlmModelOption.GEMINI_3_1_FLASH_LIVE_API,
-                -> if (BuildConfig.GEMINI_API_KEY.isBlank()) {
-                    "${option.displayName} - API key needed"
-                } else {
-                    "${option.displayName} - ready"
-                }
-                VlmModelOption.FLORENCE2_INT4,
-                VlmModelOption.FLORENCE2_INT8,
-                -> option.florenceVariant
-                    ?.let { variant ->
-                        val status = Florence2ModelStore.localStatus(this, variant)
-                        if (status.isAvailable) {
-                            "${option.displayName} - downloaded"
-                        } else {
-                            "${option.displayName} - missing ${status.missingFiles.size} files"
-                        }
-                    }
-                    ?: option.displayName
-            }
-        }.toTypedArray()
-
-        AlertDialog.Builder(this)
-            .setTitle("VLM model")
-            .setSingleChoiceItems(labels, selectedIndex) { _, which ->
-                selectedIndex = which
-            }
-            .setPositiveButton("Select") { _, _ ->
-                val option = options[selectedIndex]
-                WalkAssistSettings.setVlmModelOption(this, option)
-                vlmModelButton.text = vlmModelButtonText()
-                option.florenceVariant?.let { variant ->
-                    if (!Florence2ModelStore.localStatus(this, variant).isAvailable) {
-                        Toast.makeText(
-                            this,
-                            "Selected ${variant.displayName}. Use Download Florence models to fetch local files.",
-                            Toast.LENGTH_LONG,
-                        ).show()
-                    }
-                }
-            }
-            .setNeutralButton("Download Florence models") { _, _ ->
-                downloadFlorenceModels(Florence2OnnxVariant.values().toList())
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun downloadFlorenceModels(variants: List<Florence2OnnxVariant>) {
-        Toast.makeText(this, "Downloading Florence-2 INT4 and INT8 files...", Toast.LENGTH_LONG).show()
-        lifecycleScope.launch(Dispatchers.IO) {
-            val result = runCatching {
-                variants.forEach { variant ->
-                    Florence2ModelStore.downloadVariant(this@GuideSettingsActivity, variant)
-                }
-            }
-            withContext(Dispatchers.Main) {
-                vlmModelButton.text = vlmModelButtonText()
-                Toast.makeText(
-                    this@GuideSettingsActivity,
-                    result.fold(
-                        onSuccess = { "Florence-2 INT4 and INT8 files are ready." },
-                        onFailure = { "Florence-2 download failed: ${it.message ?: "unknown error"}" },
-                    ),
-                    Toast.LENGTH_LONG,
-                ).show()
-            }
-        }
     }
 
     private fun arcoreTtsButtonText(): String {

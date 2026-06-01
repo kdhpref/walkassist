@@ -93,8 +93,6 @@ android {
 dependencies {
     implementation("com.google.ai.edge.litert:litert:1.4.2")
     implementation("com.google.ai.edge.litert:litert-gpu:1.4.2")
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.26.0")
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.fragment:fragment-ktx:1.8.6")
