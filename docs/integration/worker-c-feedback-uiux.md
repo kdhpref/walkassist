@@ -1,54 +1,53 @@
-# Worker C Feedback UI/UX Integration
+# 피드백 UI/UX 통합 상태
 
-## 담당 범위
+## 현재 범위
 
-- 담당자: 작업자 C
-- 기능 분야: UI/UX, 접근성 피드백, 진동 피드백, 위험도 안내 안정화
-- 원본 코드: `UI_UX_WalkGuide_여준호_260416/app/src/main/java/com/JunHo/walkguide/MainActivity.kt`
-- WalkAssist 통합 브랜치: `codex/feedback-uiux`
+피드백 계층은 AR 측정, 지도 안내, OCR, Gemini 결과를 화면 상태, TTS, 진동, 접근성 announcement로 전달한다.
 
-## 통합 방식
+## 실제 구성 파일
 
-원본 코드는 UI, TTS, 진동, 센서 상태, 히스테리시스, SOS, 권한 요청, SharedPreferences가 하나의 `MainActivity`에 집중되어 있었다. WalkAssist에는 원본 Activity를 그대로 복사하지 않고, 피드백 기능만 재사용 가능한 모듈로 분리했다.
+Core:
 
-## 추가된 파일
+- `app/src/main/java/com/example/walkassist/feedback/core/FeedbackModels.kt`
+- `app/src/main/java/com/example/walkassist/feedback/core/FeedbackRequest.kt`
+- `app/src/main/java/com/example/walkassist/feedback/core/FeedbackPolicy.kt`
 
-- `app/src/main/java/com/example/walkassist/feedback/FeedbackModels.kt`
-  - 위험도 단계, 센서 상태, 센서 타입, 장애물 입력 데이터, UI 상태, 임계값 정의
-- `app/src/main/java/com/example/walkassist/feedback/FeedbackViewModel.kt`
-  - 거리/신뢰도 기반 위험도 상태 계산
-  - 히스테리시스 적용
-  - confidence window 적용
-  - coroutine 기반 센서 watchdog 적용
-  - 중복 안내 throttle 적용
-- `app/src/main/java/com/example/walkassist/feedback/FeedbackManager.kt`
-  - TalkBack 활성 여부에 따른 안내 방식 분기
-  - 자체 TTS 출력
-  - Audio Focus 요청
-  - 위험도별 진동 패턴 출력
-- `app/src/main/java/com/example/walkassist/feedback/FeedbackPreviewActivity.kt`
-  - 안전/주의/위험 피드백을 독립적으로 확인할 수 있는 테스트 화면
-- `app/src/main/res/layout/activity_feedback_preview.xml`
-  - 피드백 상태 확인용 UI
+State and mapping:
 
-## Gemini 리뷰 반영 내용
+- `app/src/main/java/com/example/walkassist/feedback/engine/ArFeedbackMapper.kt`
+- `app/src/main/java/com/example/walkassist/feedback/engine/FeedbackViewModel.kt`
 
-- Massive Activity 구조를 그대로 가져오지 않고 `ViewModel`과 `Manager`로 책임을 분리했다.
-- `Handler` 기반 watchdog 대신 `viewModelScope`와 coroutine `delay`를 사용했다.
-- 위험도 경계값이 흔들릴 때 경보가 튀지 않도록 히스테리시스를 유지했다.
-- 낮은 confidence가 섞인 프레임을 바로 믿지 않도록 confidence window를 유지했다.
-- TalkBack이 켜져 있으면 Accessibility announcement를 우선 사용하고, 그렇지 않으면 자체 TTS를 사용한다.
-- 위험도별로 TTS pitch/rate와 진동 패턴을 다르게 적용했다.
+Runtime:
 
-## 현재 제외한 범위
+- `app/src/main/java/com/example/walkassist/feedback/runtime/FeedbackManager.kt`
+- `app/src/main/java/com/example/walkassist/feedback/runtime/SpeechFeedbackController.kt`
+- `app/src/main/java/com/example/walkassist/feedback/runtime/HapticFeedbackController.kt`
+- `app/src/main/java/com/example/walkassist/feedback/runtime/AccessibilityAnnouncer.kt`
+- `app/src/main/java/com/example/walkassist/feedback/runtime/FeedbackQueue.kt`
 
-- SOS 문자/전화 기능은 이번 브랜치에 통합하지 않았다.
-- 보호자 설정 SharedPreferences UI도 이번 브랜치에 통합하지 않았다.
-- 이유: 작업자 C의 담당 핵심은 UI/UX 및 진동 피드백이며, SOS는 별도 권한/개인정보/실제 발신 리스크가 있어 별도 브랜치에서 다루는 것이 안전하다.
+UI:
 
-## 다음 작업 제안
+- `app/src/main/java/com/example/walkassist/feedback/ui/FeedbackOverlay.kt`
+- `app/src/main/java/com/example/walkassist/MainActivity.kt`
 
-- 기존 AR 위험도 계산 결과를 `FeedbackViewModel.reportObstacle()`로 전달
-- 메인 화면의 기본 안내 UI에 `FeedbackUiState`를 연결
-- AR 안내, OCR 안내, 지도 안내가 동시에 말하지 않도록 전역 speech queue 설계
-- SOS 기능이 필요하면 `SOSManager`, `UserPreferencesRepository`, 권한 launcher를 별도 브랜치로 구현
+이전 문서에 적혀 있던 `FeedbackPreviewActivity.kt`와 `activity_feedback_preview.xml`은 현재 프로젝트에 존재하지 않는다.
+
+## 현재 동작
+
+- `ArFeedbackMapper`가 `ArMeasurementState`를 피드백 입력으로 변환한다.
+- `FeedbackViewModel`은 UI 상태와 센서 입력 watchdog을 관리한다.
+- `FeedbackPolicy`는 장애물 거리, 지도, OCR, 센서 상태별 우선순위와 출력 방식을 결정한다.
+- `FeedbackManager`는 공용 TTS controller, 진동, tone, 접근성 announcement를 실행하고 반복 출력을 제한한다.
+- `FeedbackOverlayCard`와 메인 안내 화면이 위험 단계, 거리, 방향, 센서 상태를 표시한다.
+- 한국어와 영어 UI/TTS 전환을 지원한다.
+
+## 활성 경로와 비활성 경로
+
+- `MainActivity`, `MapNavigationActivity`, `SpatialReplayTestActivity`는 `FeedbackManager`를 직접 사용한다.
+- `FeedbackQueue` 클래스는 우선순위 큐 구현을 포함하지만 현재 앱 코드에서 인스턴스화하지 않는다.
+- 따라서 현재 실행 동작을 설명할 때 모든 피드백이 `FeedbackQueue`를 통과한다고 기술하면 안 된다.
+
+## 현재 제한
+
+- 거리 기반 장애물 정책의 여러 우선순위 경계값이 같은 값으로 설정되어 있어 세부 단계 구분이 제한적이다.
+- AR 장애물 기본 정책은 음성보다 진동을 중심으로 구성되어 있으며, 지도·OCR·사용자 요청 결과는 TTS를 사용한다.

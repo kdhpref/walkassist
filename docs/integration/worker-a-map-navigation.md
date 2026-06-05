@@ -1,50 +1,44 @@
-# 작업자 A - 지도/길찾기 기능 통합 메모
+# 지도·길찾기 통합 상태
 
-## 담당 범위
+## 현재 범위
 
-작업자 A는 지도 및 보행자 길찾기 기능을 담당합니다.
+지도 기능은 별도 `MapNavigationActivity`에서 실행된다. Naver Map을 화면에 표시하고, Android `Geocoder`로 목적지를 찾은 뒤 TMap 보행 경로 API를 호출한다.
 
-## 원본 코드 출처
+## 실제 구성 파일
 
-- 원본 프로젝트: `C:\Users\Administrator\Desktop\navermap\navermap`
-- 원본 핵심 파일: `app/src/main/java/com/example/navermap/MainActivity.kt`
-- 원본 기능: 네이버 지도 SDK 표시, 목적지 검색, TMap 보행자 경로 API 호출, 경로 polyline 렌더링
+- `app/src/main/java/com/example/walkassist/map/MapNavigationActivity.kt`: 지도 UI, 위치 권한, 목적지 검색, 경로 표시, 안내
+- `app/src/main/java/com/example/walkassist/map/TMapRepository.kt`: TMap 응답 파싱 및 내부 경로 모델 변환
+- `app/src/main/java/com/example/walkassist/map/TMapService.kt`: Retrofit API 인터페이스
+- `app/src/main/java/com/example/walkassist/map/TMapModels.kt`: TMap 요청·응답 및 내부 route 모델
+- `app/src/main/java/com/example/walkassist/map/RouteCameraGuidance.kt`: 경로와 카메라 방향 차이를 이용한 방향 안내
+- `app/src/main/java/com/example/walkassist/map/SharedRouteNavigation.kt`: 지도 화면의 활성 경로를 AR 화면과 공유
+- `app/src/main/res/layout/activity_map_navigation.xml`: 지도 화면 레이아웃
 
-## WalkAssist 통합 방식
+존재하지 않는 `RouteVoiceAnnouncer.kt`는 사용하지 않는다. 음성 안내는 공통 `FeedbackManager`를 통해 출력한다.
 
-원본 코드는 별도 Android 프로젝트이며 패키지명이 `com.example.navermap`입니다. 따라서 WalkAssist의 `MainActivity`를 직접 교체하지 않고, 지도 기능을 `com.example.walkassist.map` 패키지 아래 별도 모듈로 분리했습니다.
-WalkAssist 메인 오버레이 오른쪽 상단에 `길찾기` 버튼을 추가하여 UI 모드와 카메라 모드 양쪽에서 지도 화면으로 진입할 수 있게 연결했습니다.
+## 동작 흐름
 
-## 통합 파일 분류
+1. `MainActivity`에서 길찾기 버튼을 누르면 `MapNavigationActivity`를 연다.
+2. 위치 권한을 요청하고 Naver Map 현재 위치 추적을 시작한다.
+3. 목적지를 `Geocoder`로 좌표화한다.
+4. `TMapRepository`가 TMap 보행 경로를 요청한다.
+5. 경로와 안내점을 지도에 표시하고 `SharedRouteNavigation`에 발행한다.
+6. 지도 화면은 회전 벡터 센서와 GPS bearing으로 현재 방향과 경로 방향을 비교한다.
+7. AR 화면에서 Geospatial 플래그를 켜면 공유 경로를 현실 방향 안내와 횡단보도 지도 cue에 사용한다.
 
-- `MapNavigationActivity.kt`: 지도 화면, 목적지 입력, 마커/경로 렌더링, 위치 권한 처리
-- `TMapRepository.kt`: TMap 보행자 경로 API 호출 및 응답 파싱
-- `TMapService.kt`: Retrofit API 인터페이스
-- `TMapModels.kt`: TMap 요청/응답 및 내부 route 모델
-- `RouteVoiceAnnouncer.kt`: Toast 대신 Android TTS 음성 안내
-- `activity_map_navigation.xml`: 네이버 지도와 목적지 검색 UI
-
-## Gemini 리뷰 반영 사항
-
-- API Key 하드코딩 제거
-- `local.properties` 기반 `BuildConfig.TMAP_API_KEY` 사용
-- Naver Map Client ID는 manifest placeholder 사용
-- Toast 제거 및 TTS 안내로 대체
-- Retrofit 인스턴스 재사용 구조 적용
-- Retrofit callback 대신 coroutine suspend API 사용
-- 지도/네트워크/TTS/모델 파일 분리
-
-## 필요한 로컬 설정
-
-`local.properties`에 다음 값을 추가해야 지도 기능이 실제 동작합니다. 이 파일은 Git에 커밋하지 않습니다.
+## 로컬 설정
 
 ```properties
 NAVER_MAP_CLIENT_ID=your_naver_map_client_id
 TMAP_API_KEY=your_tmap_api_key
 ```
 
-## 남은 통합 작업
+- Naver Map Client ID는 manifest placeholder로 전달된다.
+- TMap API key는 `BuildConfig.TMAP_API_KEY`로 전달된다.
+- 값이 없으면 지도 인증 또는 경로 요청이 실패한다.
 
-- 지도 경로 안내와 ARCore 위험도/TTC 안내 우선순위 통합
-- ViewModel 도입 및 Activity 로직 추가 분리
-- 실제 API Key가 설정된 환경에서 지도 로딩 및 경로 API 실기기 검증
+## 현재 제한
+
+- 목적지 검색은 Android `Geocoder` 결과에 의존한다.
+- 지도 경로와 AR 화면의 결합은 프로세스 내부 `SharedRouteNavigation` 상태를 사용한다.
+- ARCore Geospatial 경로 보조는 기본값이 OFF인 디버그 플래그다.

@@ -54,7 +54,7 @@ class VideoFrameAnalyzer(
     )
 
     private val appContext = context.applicationContext
-    private val floorSegmenter = ModelFloorSegmenter(appContext)
+    private val floorSegmenter = FloorSegmenter()
     private val objectAnalyzer = ObjectAnalyzer(appContext)
     private val distanceEstimator = DistanceEstimator()
     private val pathAnalyzer = PathAnalyzer()
@@ -113,7 +113,7 @@ class VideoFrameAnalyzer(
             debugInfo = AnalyzerDebugInfo(
                 detectorReady = objectAnalyzer.isReady(),
                 floorConfidence = floorSegmentation.confidence,
-                floorMode = floorSegmenter.lastMode,
+                floorMode = "heuristic",
                 modelInputSize = objectAnalyzer.modelInputSizeLabel(),
                 modelOutputShape = objectAnalyzer.modelOutputShapeLabel(),
                 processedFrames = (frameTimeMs / DEFAULT_FRAME_INTERVAL_MS).toInt() + 1,
@@ -160,7 +160,6 @@ class VideoFrameAnalyzer(
 
     fun close() {
         objectAnalyzer.close()
-        floorSegmenter.close()
     }
 
     private fun detectObjects(bitmap: Bitmap): List<RawDetection> {

@@ -1,18 +1,25 @@
 # WalkAssist YOLO Lab
 
-Windows 데스크탑에서 `YOLO 데이터 라벨링 -> 테스트 추론 -> 학습 실행 -> export`까지 빠르게 돌리기 위한 PySide6 도구입니다.
+Windows 데스크탑에서 YOLO **bounding box detection** 데이터 라벨링, 테스트 추론, 학습, export를 수행하는 PySide6 도구다.
 
-## 기능
+## 지원 기능
 
-- 이미지 폴더 기반 bbox 라벨링
-- YOLO txt 라벨 저장 / 불러오기
-- 클래스 목록 관리
+- 이미지 폴더 기반 bounding box 라벨링
+- YOLO txt 라벨 저장 및 불러오기
+- 클래스 목록 편집
 - `dataset.yaml` 생성
-- 현재 모델로 `테스트 추론` 실행
-- 현재 모델 예측을 `자동 박스 추가`
-- 선택한 박스의 클래스를 수동으로 다시 지정
-- `yolo detect train ...` 명령 실행
-- `yolo export ...` 명령 실행
+- 현재 모델 테스트 추론
+- 현재 모델 예측 box 자동 추가
+- `yolo detect train ...` 실행
+- `yolo export ...` 실행
+
+## 중요한 범위 구분
+
+- 이 도구는 polygon/mask 라벨링을 지원하지 않으며 학습 명령도 `yolo detect train`이다.
+- 따라서 앱의 현재 `yolo26n-seg.tflite`를 그대로 재학습하는 segmentation 파이프라인은 아니다.
+- 기본 클래스 목록은 `person`, `crosswalk`, 계단, 신호등 상태 등 WalkAssist 실험용 사용자 정의 목록이다.
+- 앱에 포함된 현재 `app/src/main/assets/labels.txt`는 COCO 80개 클래스이며 YOLO Lab 기본 클래스와 일치하지 않는다.
+- export 결과를 Android 앱에 넣으려면 모델 출력 형태, 라벨 순서, TFLite 호환성을 별도로 검증해야 한다.
 
 ## 설치
 
@@ -29,9 +36,9 @@ cd C:\Users\Administrator\AndroidStudioProjects\WalkAssist\desktop_tools\yolo_la
 python app.py
 ```
 
-또는 [run_yolo_lab.bat](/C:/Users/Administrator/AndroidStudioProjects/WalkAssist/desktop_tools/yolo_lab/run_yolo_lab.bat)를 실행합니다.
+또는 `run_yolo_lab.bat`를 실행한다.
 
-## 권장 데이터 구조
+## 권장 detection 데이터 구조
 
 ```text
 dataset_root/
@@ -46,9 +53,9 @@ dataset_root/
   dataset.yaml
 ```
 
-라벨링 탭에서는 `images/train` 같은 실제 이미지 폴더와 대응하는 `labels/train` 폴더를 직접 선택해서 작업하면 됩니다.
+라벨링 화면에서는 실제 이미지 폴더와 대응하는 labels 폴더를 직접 선택할 수 있다.
 
-## 기본 클래스 예시
+## 기본 클래스
 
 - `person`
 - `crosswalk`
@@ -57,17 +64,10 @@ dataset_root/
 - `traffic_light_red`
 - `traffic_light_green`
 
-신호등 상태를 실제 안내에 활용하려면 `traffic_light` 하나만 두는 것보다 상태별 클래스로 직접 라벨링하는 편이 더 단순하고 발표용 설명도 분명합니다.
+클래스 순서는 학습과 추론 결과 해석에 직접 영향을 준다. export 모델을 앱에서 사용할 경우 앱의 `labels.txt`도 동일한 순서로 교체해야 한다.
 
-추천 작업 흐름:
-1. `테스트 추론`으로 현재 이미지 예측 확인
-2. `자동 박스 추가`로 bbox 초안 생성
-3. 필요한 박스를 클릭
-4. 클래스 콤보에서 `traffic_light_red` 또는 `traffic_light_green` 선택
-5. `선택 박스 클래스 적용`
-6. 저장
+## 현재 제한
 
-## 현재 범위
-
-- 최소 기능 MVP입니다.
-- 영상 프레임 추출, 학습 그래프 시각화, 프로젝트별 메타데이터 관리는 아직 포함하지 않았습니다.
+- 최소 기능 MVP다.
+- segmentation mask 라벨링과 `yolo segment train`을 지원하지 않는다.
+- 영상 프레임 추출, 학습 그래프 시각화, 프로젝트별 데이터 버전 관리는 포함하지 않는다.
