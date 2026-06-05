@@ -111,8 +111,7 @@ sealed class FeedbackInput {
 
     data class Obstacle(
         val sample: FeedbackObstacleSample,
-        val direction: String = "unknown",
-        val crosswalkDetected: Boolean = false
+        val direction: String = "unknown"
     ) : FeedbackInput()
 
     data class Message(
@@ -122,8 +121,7 @@ sealed class FeedbackInput {
         val distanceMeters: Float? = null,
         val confidence: Float = 0f,
         val sensorStatus: FeedbackSensorStatus = FeedbackSensorStatus.CONNECTED,
-        val direction: String = "unknown",
-        val crosswalkDetected: Boolean = false
+        val direction: String = "unknown"
     ) : FeedbackInput()
 }
 
@@ -134,7 +132,6 @@ data class FeedbackUiState(
     val alertLevel: FeedbackAlertLevel = FeedbackAlertLevel.SAFE,
     val sensorStatus: FeedbackSensorStatus = FeedbackSensorStatus.WAITING,
     val distanceMeters: Float? = null,
-    val crosswalkDetected: Boolean = false,
     val direction: String = "unknown",
     val message: String = "공간 정보를 수집하는 중입니다.",
     val confidence: Float = 0f,

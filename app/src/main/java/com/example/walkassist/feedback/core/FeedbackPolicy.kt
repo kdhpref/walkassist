@@ -144,8 +144,7 @@ class FeedbackPolicy {
      */
     fun obstacleRequest(
         distanceMeters: Float,
-        direction: String = "unknown",
-        crosswalkDetected: Boolean = false
+        direction: String = "unknown"
     ): FeedbackRequest {
         val (priority, alertLevel, outputMode) = classifyByDistance(distanceMeters)
 
@@ -157,8 +156,7 @@ class FeedbackPolicy {
                 alertLevel = alertLevel,
                 priority = priority,
                 distanceMeters = distanceMeters,
-                direction = direction,
-                crosswalkDetected = crosswalkDetected
+                direction = direction
             ),
             outputMode = outputMode,
             distanceMeters = distanceMeters,
@@ -290,8 +288,7 @@ class FeedbackPolicy {
     fun decide(
         distanceMeters: Float,
         currentLevel: FeedbackAlertLevel,
-        direction: String = "unknown",
-        crosswalkDetected: Boolean = false
+        direction: String = "unknown"
     ): FeedbackDecision {
         val nextLevel = classifyWithHysteresis(
             distanceMeters = distanceMeters,
@@ -306,8 +303,7 @@ class FeedbackPolicy {
                 alertLevel = nextLevel,
                 priority = priority,
                 distanceMeters = distanceMeters,
-                direction = direction,
-                crosswalkDetected = crosswalkDetected
+                direction = direction
             )
         )
     }
@@ -366,8 +362,7 @@ class FeedbackPolicy {
         alertLevel: FeedbackAlertLevel,
         priority: Int,
         distanceMeters: Float,
-        direction: String,
-        crosswalkDetected: Boolean
+        direction: String
     ): String {
         val base = when {
             priority == 1 -> "즉시 멈추세요. 전방 ${formatDistance(distanceMeters)} 안에 장애물이 있습니다."
@@ -387,13 +382,7 @@ class FeedbackPolicy {
             else -> ""
         }
 
-        val crosswalkHint = if (crosswalkDetected) {
-            " 횡단보도가 감지되었습니다."
-        } else {
-            ""
-        }
-
-        return base + directionHint + crosswalkHint
+        return base + directionHint
     }
 
     private fun obstacleThrottleKey(

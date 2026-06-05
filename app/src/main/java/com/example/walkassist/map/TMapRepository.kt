@@ -92,7 +92,6 @@ class TMapRepository(
         return index == 0 ||
             contains("좌회전") ||
             contains("우회전") ||
-            contains("횡단보도") ||
             contains("유턴") ||
             contains("도착")
     }

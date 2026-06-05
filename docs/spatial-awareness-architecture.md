@@ -10,7 +10,6 @@ ARCore Frame
   ├─ raw depth + confidence
   └─ camera image
        ├─ YOLO26n-seg 객체 및 분할 polygon
-       ├─ 횡단보도 stripe 패턴
        ├─ one-shot OCR
        └─ one-shot Gemini 이미지 설명
 
@@ -52,12 +51,6 @@ hit tests + raw depth
 3. 객체 추적 결과와 결합해 접근 속도, 객체별 TTC, 회피 방향을 보강한다.
 
 따라서 “마스크-깊이 결합은 향후 작업”이라는 설명은 현재 코드와 맞지 않는다. 이미 구현되어 있으며 품질 검증과 튜닝이 남아 있다.
-
-### 횡단보도 인식
-
-`CrosswalkPatternDetector`는 영상의 밝은 stripe 패턴을 탐지한다. 선택적 Geospatial 기능이 켜져 있고 공유 경로에 횡단보도 안내점이 있으면 지도 cue를 결합한다.
-
-YOLO confidence를 결합하는 코드도 있지만 현재 `labels.txt`는 COCO 80개 클래스이며 `crosswalk`가 없다. 따라서 제공된 기본 모델에서는 YOLO 횡단보도 분기가 실질적으로 동작하지 않는다.
 
 ### 위험도 및 피드백
 
@@ -103,7 +96,7 @@ Florence-2 관련 Android 코드와 데스크탑 도구는 남아 있으나 현�
 - 회전 벡터 센서와 GPS bearing을 이용한 방향 안내
 - `SharedRouteNavigation`을 통한 AR 화면 경로 공유
 
-라이브 AR 화면에서 Geospatial 플래그를 켜면 공유 경로와 ARCore Geospatial pose를 사용해 현실 방향 안내와 횡단보도 지도 cue를 계산한다. 이 플래그의 기본값은 OFF다.
+라이브 AR 화면에서 Geospatial 플래그를 켜면 공유 경로와 ARCore Geospatial pose를 사용해 현실 방향 안내를 계산한다. 이 플래그의 기본값은 OFF다.
 
 ## 영상 리플레이 진단
 
@@ -111,7 +104,7 @@ Florence-2 관련 Android 코드와 데스크탑 도구는 남아 있으나 현�
 
 - YOLO 객체 분할
 - `FloorSegmenter`의 색상 기반 heuristic 바닥 경계 분석
-- 영상 기반 거리 추정, 경로 분석, 횡단보도 패턴 분석
+- 영상 기반 거리 추정, 경로 분석
 
 일반 영상에는 ARCore pose, hit test, plane, raw depth가 없으므로 이 경로는 라이브 AR 파이프라인을 대체하지 않는다. 또한 기본 UI에서 `SpatialReplayTestActivity`로 이동하는 버튼은 없다.
 
@@ -138,4 +131,3 @@ Florence-2 관련 Android 코드와 데스크탑 도구는 남아 있으나 현�
 - 라이브 AR 결과와 영상 리플레이 결과를 같은 실험 조건으로 취급하지 않는다.
 - 영상 리플레이의 heuristic 바닥 경계 분석을 학습 모델 기반 분할로 기술하지 않는다.
 - 현재 Gemini가 AR/depth 컨텍스트를 입력받는다고 기술하지 않는다.
-- 현재 기본 YOLO 모델이 횡단보도를 직접 분류한다고 기술하지 않는다.

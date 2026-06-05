@@ -29,7 +29,6 @@ class Florence2OnnxVlmSceneInterpreter(
     override fun interpret(
         frame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
         outputLanguageCode: String,
     ): VlmSceneInterpretation? {
         if (frame.requestMode != VlmRequestMode.MANUAL) {
@@ -61,7 +60,6 @@ class Florence2OnnxVlmSceneInterpreter(
             val koreanSummary = Florence2KoreanSceneFormatter.format(
                 florenceCaption = caption,
                 primaryAnalysis = primaryAnalysis,
-                crosswalk = crosswalk,
             )
             val summary = VlmWalkingAnnouncementFormatter.sanitizeForWalkingTts(
                 text = koreanSummary,

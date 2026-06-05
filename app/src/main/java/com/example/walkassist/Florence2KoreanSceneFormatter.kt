@@ -4,14 +4,13 @@ object Florence2KoreanSceneFormatter {
     fun format(
         florenceCaption: String,
         primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
     ): String {
         val caption = florenceCaption.cleanCaption()
         val sceneSentence = when {
             caption.containsHangul() -> caption.takeSentences(maxSentences = 2)
             else -> buildKoreanSceneSentence(caption, primaryAnalysis)
         }
-        val pathSentence = buildPathSentence(primaryAnalysis, crosswalk)
+        val pathSentence = buildPathSentence(primaryAnalysis)
         return listOf(sceneSentence, pathSentence)
             .filter { it.isNotBlank() }
             .joinToString(" ")
@@ -47,12 +46,10 @@ object Florence2KoreanSceneFormatter {
 
     private fun buildPathSentence(
         primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
     ): String {
         val metrics = primaryAnalysis.pathMetrics
         val collisionDistance = metrics?.collisionDistanceMeters ?: metrics?.centerObstacleMeters
         return when {
-            crosswalk.detected -> "바닥에는 횡단보도 무늬가 보입니다."
             collisionDistance != null && collisionDistance < 1.2f -> "앞쪽 통로가 가까운 장애물로 좁아 보입니다."
             metrics?.likelyWallAhead == true -> "정면에 벽처럼 막힌 면이 가까이 보일 수 있습니다."
             metrics?.pathClearMeters != null && metrics.pathClearMeters >= 1.8f -> "앞쪽 보행 공간은 비교적 열려 있습니다."
@@ -87,7 +84,6 @@ object Florence2KoreanSceneFormatter {
             "bench" -> "벤치"
             "traffic light" -> "신호등"
             "stop sign" -> "정지 표지판"
-            "crosswalk" -> "횡단보도"
             "door" -> "문"
             "curb" -> "턱"
             "traffic cone", "cone" -> "안전 콘"
@@ -139,7 +135,6 @@ object Florence2KoreanSceneFormatter {
         CaptionKeyword(Regex("\\b(bus|buses)\\b", RegexOption.IGNORE_CASE), "버스"),
         CaptionKeyword(Regex("\\b(bicycle|bike|cyclist)\\b", RegexOption.IGNORE_CASE), "자전거"),
         CaptionKeyword(Regex("\\b(motorcycle|scooter)\\b", RegexOption.IGNORE_CASE), "오토바이"),
-        CaptionKeyword(Regex("\\b(crosswalk|zebra crossing|pedestrian crossing)\\b", RegexOption.IGNORE_CASE), "횡단보도"),
         CaptionKeyword(Regex("\\b(door|entrance|gate)\\b", RegexOption.IGNORE_CASE), "문"),
         CaptionKeyword(Regex("\\b(sign|signage|traffic sign)\\b", RegexOption.IGNORE_CASE), "표지판"),
         CaptionKeyword(Regex("\\b(traffic light|signal light)\\b", RegexOption.IGNORE_CASE), "신호등"),
@@ -150,6 +145,6 @@ object Florence2KoreanSceneFormatter {
         CaptionKeyword(Regex("\\b(cone|traffic cone|construction cone)\\b", RegexOption.IGNORE_CASE), "안전 콘"),
         CaptionKeyword(Regex("\\b(curb|kerb)\\b", RegexOption.IGNORE_CASE), "턱"),
     )
-    private val OUTDOOR_REGEX = Regex("\\b(street|road|sidewalk|crosswalk|vehicle|traffic|building)\\b", RegexOption.IGNORE_CASE)
+    private val OUTDOOR_REGEX = Regex("\\b(street|road|sidewalk|vehicle|traffic|building)\\b", RegexOption.IGNORE_CASE)
     private val INDOOR_REGEX = Regex("\\b(room|hallway|corridor|indoor|floor|door|wall)\\b", RegexOption.IGNORE_CASE)
 }

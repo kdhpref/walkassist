@@ -12,7 +12,6 @@ object VlmWalkingAnnouncementFormatter {
     fun build(
         interpretation: VlmSceneInterpretation,
         primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
     ): String {
         val action = when (interpretation.suggestedAction) {
             VlmSuggestedAction.PROCEED -> "천천히 직진해도 됩니다."
@@ -35,13 +34,12 @@ object VlmWalkingAnnouncementFormatter {
                 .take(3)
             when {
                 detectedObjects.isNotEmpty() -> detectedObjects.map { "$it 감지" }
-                crosswalk.detected -> listOf("횡단보도 패턴 감지")
                 else -> emptyList()
             }
         }
         val summary = sanitizeForWalkingTts(
             text = interpretation.pathSummary,
-            fallback = fallbackSceneSummary(cues, interpretation.risk, crosswalk.detected),
+            fallback = fallbackSceneSummary(cues, interpretation.risk),
         ).takeIf { it.isNotBlank() }
 
         return buildString {
@@ -104,13 +102,9 @@ object VlmWalkingAnnouncementFormatter {
     private fun fallbackSceneSummary(
         cues: List<String>,
         risk: VlmWalkingRisk,
-        crosswalkDetected: Boolean,
     ): String {
         if (cues.isNotEmpty()) {
             return "카메라 방향에 ${cues.joinToString(", ") { it.toSceneCue() }}이 보입니다"
-        }
-        if (crosswalkDetected) {
-            return "카메라 방향 바닥에 횡단보도 패턴이 보입니다"
         }
         return when (risk) {
             VlmWalkingRisk.BLOCKED -> "카메라 방향 앞쪽 통로가 막혀 보입니다"
@@ -126,7 +120,6 @@ object VlmWalkingAnnouncementFormatter {
         val lower = cue.lowercase()
         return when {
             lower == "person_detected" -> "사람 감지"
-            lower.startsWith("crosswalk=") -> "횡단보도 패턴 감지"
             lower.startsWith("yolo-seg:") -> cue.removePrefix("YOLO-seg:").trim()
             lower.startsWith("arcore:") -> cue
             lower.startsWith("imu:") -> cue
@@ -164,7 +157,6 @@ object VlmWalkingAnnouncementFormatter {
             "bench" -> "벤치"
             "traffic light" -> "신호등"
             "stop sign" -> "표지판"
-            "crosswalk" -> "횡단보도"
             "door" -> "문"
             "curb" -> "턱"
             "traffic cone", "cone" -> "안전 콘"

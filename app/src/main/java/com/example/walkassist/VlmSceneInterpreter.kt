@@ -40,7 +40,6 @@ interface VlmSceneInterpreter {
     fun interpret(
         frame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
         outputLanguageCode: String = "ko",
     ): VlmSceneInterpretation?
 
@@ -78,7 +77,6 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
     override fun interpret(
         frame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
         outputLanguageCode: String,
     ): VlmSceneInterpretation {
         val collisionDistance = primaryAnalysis.pathMetrics?.collisionDistanceMeters
@@ -87,7 +85,7 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
         val hasPerson = primaryAnalysis.detections.any { it.label.equals("person", ignoreCase = true) }
         val risk = when {
             centerBlocked -> VlmWalkingRisk.BLOCKED
-            hasPerson || crosswalk.detected -> VlmWalkingRisk.CAUTION
+            hasPerson -> VlmWalkingRisk.CAUTION
             primaryAnalysis.floorSegmentation?.confidence != null &&
                 primaryAnalysis.floorSegmentation.confidence >= 0.55f -> VlmWalkingRisk.CLEAR
             else -> VlmWalkingRisk.UNKNOWN
@@ -109,11 +107,10 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
                 VlmWalkingRisk.BLOCKED -> 0.66f
                 VlmWalkingRisk.UNKNOWN -> 0.35f
             },
-            pathSummary = buildFallbackSceneSummary(primaryAnalysis, crosswalk, risk, outputLanguageCode),
+            pathSummary = buildFallbackSceneSummary(primaryAnalysis, risk, outputLanguageCode),
             evidence = buildList {
                 add("source=${frame.source.name.lowercase()}")
                 primaryAnalysis.pathMetrics?.pathClearMeters?.let { add("pathClear=${String.format("%.1f", it)}m") }
-                if (crosswalk.detected) add("crosswalk=${(crosswalk.score * 100f).toInt()}%")
                 if (hasPerson) add("person_detected")
                 addAll(
                     primaryAnalysis.detections
@@ -128,7 +125,6 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
 
     private fun buildFallbackSceneSummary(
         primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
         risk: VlmWalkingRisk,
         outputLanguageCode: String,
     ): String {
@@ -143,7 +139,6 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
                 .filter { it.isNotBlank() }
             val visible = when {
                 objectPhrases.isNotEmpty() -> "Visible ahead: ${objectPhrases.joinToString(", ")}."
-                crosswalk.detected -> "A crosswalk pattern is visible on the floor ahead."
                 risk == VlmWalkingRisk.CLEAR -> "The walking space ahead appears mostly open."
                 risk == VlmWalkingRisk.CAUTION -> "There is something ahead that needs caution."
                 risk == VlmWalkingRisk.BLOCKED -> "The path ahead appears blocked."
@@ -169,7 +164,6 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
 
         val firstSentence = when {
             objectPhrases.isNotEmpty() -> "카메라 방향에 ${objectPhrases.joinToString(", ")}이 보입니다."
-            crosswalk.detected -> "카메라 방향 바닥에 횡단보도 패턴이 보입니다."
             else -> when (risk) {
                 VlmWalkingRisk.CLEAR -> "카메라 방향의 전방 보행 공간이 대체로 열려 있습니다."
                 VlmWalkingRisk.CAUTION -> "카메라 방향 전방에 주의할 장면이 있습니다."
@@ -179,7 +173,6 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
         }
 
         val pathSentence = when {
-            crosswalk.detected && objectPhrases.isNotEmpty() -> "바닥에는 횡단보도 패턴이 함께 감지됩니다."
             primaryAnalysis.pathMetrics?.pathClearMeters != null ->
                 "전방 보행 가능 거리는 약 ${formatMeters(primaryAnalysis.pathMetrics.pathClearMeters)}로 추정됩니다."
             primaryAnalysis.floorSegmentation?.confidence != null &&
@@ -251,7 +244,6 @@ class StubVlmSceneInterpreter : VlmSceneInterpreter {
             "bench" -> "벤치"
             "traffic light" -> "신호등"
             "stop sign" -> "표지판"
-            "crosswalk" -> "횡단보도"
             "door" -> "문"
             "curb" -> "턱"
             "traffic cone", "cone" -> "안전콘"

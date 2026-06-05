@@ -24,7 +24,7 @@
 4. `TMapRepository`가 TMap 보행 경로를 요청한다.
 5. 경로와 안내점을 지도에 표시하고 `SharedRouteNavigation`에 발행한다.
 6. 지도 화면은 회전 벡터 센서와 GPS bearing으로 현재 방향과 경로 방향을 비교한다.
-7. AR 화면에서 Geospatial 플래그를 켜면 공유 경로를 현실 방향 안내와 횡단보도 지도 cue에 사용한다.
+7. AR 화면에서 Geospatial 플래그를 켜면 공유 경로를 현실 방향 안내에 사용한다.
 
 ## 로컬 설정
 

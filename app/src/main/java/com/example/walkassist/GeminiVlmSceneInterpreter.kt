@@ -34,7 +34,6 @@ class GeminiVlmSceneInterpreter(
     override fun interpret(
         frame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
         outputLanguageCode: String,
     ): VlmSceneInterpretation? {
         if (frame.requestMode != VlmRequestMode.MANUAL || apiKey.isBlank()) {

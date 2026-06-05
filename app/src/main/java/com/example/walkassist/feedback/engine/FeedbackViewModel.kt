@@ -92,7 +92,6 @@ class FeedbackViewModel(
                             sensorStatus = FeedbackSensorStatus.DISCONNECTED,
                             confidence = 0f,
                             direction = previous.direction,
-                            crosswalkDetected = previous.crosswalkDetected,
                             shouldAnnounce = shouldAnnounceRequest(
                                 previous = previous,
                                 request = request
@@ -141,18 +140,10 @@ class FeedbackViewModel(
             FeedbackSensorStatus.ERROR -> "unknown"
         }
 
-        val nextCrosswalkDetected = when (status) {
-            FeedbackSensorStatus.CONNECTED -> previous.crosswalkDetected
-            FeedbackSensorStatus.WAITING,
-            FeedbackSensorStatus.DISCONNECTED,
-            FeedbackSensorStatus.ERROR -> false
-        }
-
         return FeedbackUiState(
             alertLevel = request.alertLevel,
             sensorStatus = status,
             distanceMeters = nextDistanceMeters,
-            crosswalkDetected = nextCrosswalkDetected,
             direction = nextDirection,
             message = request.message,
             confidence = nextConfidence,
@@ -187,22 +178,19 @@ class FeedbackViewModel(
                 sensorStatus = FeedbackSensorStatus.CONNECTED,
                 confidence = confidence,
                 direction = input.direction,
-                crosswalkDetected = input.crosswalkDetected,
                 shouldAnnounce = false
             )
         }
 
         val request = feedbackPolicy.obstacleRequest(
             distanceMeters = input.sample.distanceMeters,
-            direction = input.direction,
-            crosswalkDetected = input.crosswalkDetected
+            direction = input.direction
         )
 
         return request.toUiState(
             sensorStatus = FeedbackSensorStatus.CONNECTED,
             confidence = confidence,
             direction = input.direction,
-            crosswalkDetected = input.crosswalkDetected,
             shouldAnnounce = false
         )
     }
@@ -239,7 +227,6 @@ class FeedbackViewModel(
             alertLevel = input.alertLevel,
             sensorStatus = input.sensorStatus,
             distanceMeters = input.distanceMeters,
-            crosswalkDetected = input.crosswalkDetected,
             direction = input.direction,
             message = normalizedMessage,
             confidence = input.confidence.coerceIn(0f, 1f),
@@ -255,14 +242,12 @@ class FeedbackViewModel(
         sensorStatus: FeedbackSensorStatus,
         confidence: Float,
         direction: String,
-        crosswalkDetected: Boolean,
         shouldAnnounce: Boolean
     ): FeedbackUiState {
         return FeedbackUiState(
             alertLevel = alertLevel,
             sensorStatus = sensorStatus,
             distanceMeters = distanceMeters,
-            crosswalkDetected = crosswalkDetected,
             direction = direction,
             message = message,
             confidence = confidence,

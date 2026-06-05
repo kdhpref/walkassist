@@ -17,7 +17,7 @@ Windows 데스크탑에서 YOLO **bounding box detection** 데이터 라벨링, 
 
 - 이 도구는 polygon/mask 라벨링을 지원하지 않으며 학습 명령도 `yolo detect train`이다.
 - 따라서 앱의 현재 `yolo26n-seg.tflite`를 그대로 재학습하는 segmentation 파이프라인은 아니다.
-- 기본 클래스 목록은 `person`, `crosswalk`, 계단, 신호등 상태 등 WalkAssist 실험용 사용자 정의 목록이다.
+- 기본 클래스 목록은 `person`, 계단, 신호등 상태 등 WalkAssist 실험용 사용자 정의 목록이다.
 - 앱에 포함된 현재 `app/src/main/assets/labels.txt`는 COCO 80개 클래스이며 YOLO Lab 기본 클래스와 일치하지 않는다.
 - export 결과를 Android 앱에 넣으려면 모델 출력 형태, 라벨 순서, TFLite 호환성을 별도로 검증해야 한다.
 
@@ -58,7 +58,6 @@ dataset_root/
 ## 기본 클래스
 
 - `person`
-- `crosswalk`
 - `stairs_up`
 - `stairs_down`
 - `traffic_light_red`

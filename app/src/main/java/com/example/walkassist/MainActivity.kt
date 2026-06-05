@@ -821,12 +821,14 @@ private fun WalkAssistRootOverlay(
                 onClick = openSettings,
                 contentDescription = uiText.settingsA11y,
             )
-            Spacer(modifier = Modifier.height(10.dp))
-            GuideActionChip(
-                text = uiText.languageToggle,
-                onClick = { appLanguage = appLanguage.toggle() },
-                contentDescription = uiText.languageToggleA11y,
-            )
+            if (appLanguage == WalkAssistLanguage.KO) {
+                Spacer(modifier = Modifier.height(10.dp))
+                GuideActionChip(
+                    text = uiText.languageToggle,
+                    onClick = { appLanguage = appLanguage.toggle() },
+                    contentDescription = uiText.languageToggleA11y,
+                )
+            }
         }
 
         ResourceUsagePanel(

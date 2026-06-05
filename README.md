@@ -22,7 +22,6 @@ ARCore 공간 측정, 객체 분할, 지도 경로, OCR, 음성·진동 피드�
 | 로컬 공간 지도 | 기본 흐름에서 활성 | ARCore hit와 raw depth 관측을 2D occupancy map으로 누적한다. |
 | 객체 인식 | 기본 흐름에서 활성 | `yolo26n-seg.tflite`를 LiteRT/TFLite 인터프리터로 실행한다. |
 | 객체 마스크-깊이 결합 | 구현됨 | 분할 polygon 내부의 raw depth를 샘플링하고, 실패 시 bounding box 샘플링으로 대체한다. |
-| 횡단보도 인식 | 부분 구현 | 영상 stripe 패턴과 선택적 지도 경로 cue를 결합한다. 현재 `labels.txt`에는 `crosswalk` 클래스가 없어 YOLO 횡단보도 confidence는 기본 모델에서 제공되지 않는다. |
 | VLM | 기본 흐름에서 수동 실행 | 짧은 터치 시 `gemini-2.5-flash-lite`에 현재 RGB 이미지를 전송한다. 구조화된 AR/객체 컨텍스트는 현재 Gemini 요청에 포함하지 않는다. |
 | OCR | 기본 흐름에서 수동 실행 | 2초 길게 누르면 ML Kit Korean Text Recognition으로 현재 프레임을 한 번 읽는다. |
 | 지도 길찾기 | 기본 흐름에서 활성 | Naver Map, Android Geocoder, TMap 보행 경로 API, 회전 벡터 센서를 사용한다. |
@@ -98,7 +97,6 @@ GEMINI_API_KEY=your_gemini_api_key
 
 - 기본 충돌 거리와 방향 판단은 로컬 occupancy map 및 ARCore depth에 의존한다.
 - 현재 Gemini 요청은 RGB 이미지만 전송하며 AR 측정값을 구조화해 보내지 않는다.
-- 현재 기본 YOLO 라벨에는 횡단보도 클래스가 없다.
 - 지도 경로와 AR Geospatial 결합은 선택 기능이며 기본값이 OFF다.
 - 프로젝트 텍스트 파일은 UTF-8을 사용하며 `.editorconfig`에서 인코딩을 고정한다.
 

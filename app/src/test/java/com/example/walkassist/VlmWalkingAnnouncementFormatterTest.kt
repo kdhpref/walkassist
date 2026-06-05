@@ -37,13 +37,6 @@ class VlmWalkingAnnouncementFormatterTest {
                 detections = emptyList(),
                 nearestObstacle = null,
             ),
-            crosswalk = CrosswalkPatternResult(
-                detected = false,
-                score = 0f,
-                stripeCount = 0,
-                yoloConfidence = 0f,
-                modeLabel = "test",
-            ),
         )
 
         assertTrue(message.contains("공사 표지판"))
@@ -66,13 +59,6 @@ class VlmWalkingAnnouncementFormatterTest {
             primaryAnalysis = FrameAnalysis(
                 detections = emptyList(),
                 nearestObstacle = null,
-            ),
-            crosswalk = CrosswalkPatternResult(
-                detected = false,
-                score = 0f,
-                stripeCount = 0,
-                yoloConfidence = 0f,
-                modeLabel = "test",
             ),
         )
 
@@ -98,13 +84,6 @@ class VlmWalkingAnnouncementFormatterTest {
             primaryAnalysis = FrameAnalysis(
                 detections = emptyList(),
                 nearestObstacle = null,
-            ),
-            crosswalk = CrosswalkPatternResult(
-                detected = false,
-                score = 0f,
-                stripeCount = 0,
-                yoloConfidence = 0f,
-                modeLabel = "test",
             ),
         )
 

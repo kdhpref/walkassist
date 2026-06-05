@@ -66,10 +66,6 @@ fun FeedbackOverlayCard(
             append(formatDistanceShort(distance))
         }
 
-        if (state.crosswalkDetected) {
-            append(if (isEnglish) ". Crosswalk detected" else ". 횡단보도 감지")
-        }
-
         val directionText = presentableDirection(state.direction, isEnglish)
         if (directionText.isNotBlank()) {
             append(". ")
@@ -117,16 +113,6 @@ fun FeedbackOverlayCard(
                 },
                 color = Color(0xFFD8E3EE),
                 fontSize = 12.sp,
-            )
-        }
-
-        if (state.crosswalkDetected) {
-            Spacer(modifier = Modifier.height(3.dp))
-            Text(
-                text = if (isEnglish) "Crosswalk detected" else "횡단보도 감지됨",
-                color = Color(0xFFB6E7FF),
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
             )
         }
 

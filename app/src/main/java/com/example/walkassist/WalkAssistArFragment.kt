@@ -1,4 +1,4 @@
-﻿package com.example.walkassist
+package com.example.walkassist
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -53,10 +53,8 @@ import javax.microedition.khronos.opengles.GL10
 import com.naver.maps.geometry.LatLng
 import kotlin.math.abs
 import kotlin.math.atan2
-import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.roundToInt
-import kotlin.math.sin
 import kotlin.math.sqrt
 
 class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
@@ -99,11 +97,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         val leftFreeSpaceMeters: Float?,
         val centerFreeSpaceMeters: Float?,
         val rightFreeSpaceMeters: Float?,
-    )
-
-    private data class CrosswalkFrameSnapshot(
-        val pattern: CrosswalkPatternResult,
-        val timestampNanos: Long,
     )
 
     private data class CorridorHit(
@@ -202,7 +195,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private val routeGuidanceEngine = RouteCameraGuidanceEngine()
     private var oneShotOcrReader: OneShotOcrReader? = null
     private val objectTracker = ObjectTracker()
-    private val crosswalkPatternDetector = CrosswalkPatternDetector()
     private val detectorExecutor = Executors.newSingleThreadExecutor()
     private val vlmExecutor = Executors.newSingleThreadExecutor()
     private val detectionInFlight = AtomicBoolean(false)
@@ -215,13 +207,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
     private var lastObjectDetections: List<ObjectOverlayDetection> = emptyList()
     @Volatile
     private var lastVlmVisionState: VlmVisionState? = null
-    @Volatile
-    private var lastCrosswalkFrameSnapshot = CrosswalkFrameSnapshot(
-        pattern = EMPTY_CROSSWALK_RESULT,
-        timestampNanos = 0L,
-    )
-    private var smoothedCrosswalkScore = 0f
-    private val crosswalkDetectionHistory = ArrayDeque<Boolean>()
     private val objectMotionMemory = mutableMapOf<Int, ObjectMotionMemory>()
     private val worldLocalMap = WorldLocalMap(
         halfRangeMeters = 5f,
@@ -860,116 +845,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         if (heading < 0.0) heading += 360.0
         return heading
     }
-
-    private fun computeCrosswalkFusion(
-        frame: Frame,
-        debugFlags: DebugPipelineFlags,
-    ): CrosswalkFusionResult {
-        val snapshot = lastCrosswalkFrameSnapshot
-        val pattern = if (
-            snapshot.timestampNanos > 0L &&
-            frame.timestamp >= snapshot.timestampNanos &&
-            frame.timestamp - snapshot.timestampNanos <= CROSSWALK_PATTERN_STALE_NANOS
-        ) {
-            snapshot.pattern
-        } else {
-            EMPTY_CROSSWALK_RESULT
-        }
-        val mapCue = computeCrosswalkMapCue(arSession, debugFlags)
-        val rawFusion = crosswalkPatternDetector.fuse(
-            pattern = pattern,
-            mapCue = mapCue,
-            previousScore = smoothedCrosswalkScore,
-        )
-        smoothedCrosswalkScore = rawFusion.score
-        crosswalkDetectionHistory += rawFusion.detected
-        while (crosswalkDetectionHistory.size > CROSSWALK_HISTORY_SIZE) {
-            crosswalkDetectionHistory.removeFirst()
-        }
-        val stableDetected = if (rawFusion.detected) {
-            crosswalkDetectionHistory.count { it } >= 2 || rawFusion.score >= 0.72f
-        } else {
-            crosswalkDetectionHistory.count { it } >= 3 && rawFusion.score >= 0.48f
-        }
-        return rawFusion.copy(detected = stableDetected)
-    }
-
-    private fun yoloOnlyCrosswalkResult(yoloConfidence: Float): CrosswalkPatternResult {
-        val confidence = yoloConfidence.coerceIn(0f, 1f)
-        return CrosswalkPatternResult(
-            detected = confidence >= 0.55f,
-            score = (confidence * 0.62f).coerceIn(0f, 1f),
-            stripeCount = 0,
-            yoloConfidence = confidence,
-            modeLabel = if (confidence >= 0.35f) "yolo-only" else "none",
-        )
-    }
-
-    private fun computeCrosswalkMapCue(
-        session: Session?,
-        debugFlags: DebugPipelineFlags,
-    ): CrosswalkMapCue {
-        if (!debugFlags.geospatialEnabled || !geospatialConfiguredActive) return CrosswalkMapCue(active = false, confidence = 0f)
-        val sharedRoute = SharedRouteNavigation.currentState()
-        if (!sharedRoute.active) return CrosswalkMapCue(active = false, confidence = 0f)
-        val crosswalkGuidePoints = sharedRoute.guidePoints.filter { point ->
-            point.description.contains("횡단보도") ||
-                point.description.contains("crosswalk", ignoreCase = true)
-        }
-        if (crosswalkGuidePoints.isEmpty()) return CrosswalkMapCue(active = false, confidence = 0f)
-
-        val earth = runCatching { session?.earth }.getOrNull() ?: return CrosswalkMapCue(active = false, confidence = 0f)
-        if (earth.trackingState != TrackingState.TRACKING) return CrosswalkMapCue(active = false, confidence = 0f)
-        val pose = runCatching { earth.cameraGeospatialPose }.getOrNull() ?: return CrosswalkMapCue(active = false, confidence = 0f)
-        val heading = cameraHeadingDegrees(pose)
-        if (!pose.latitude.isFinite() || !pose.longitude.isFinite()) return CrosswalkMapCue(active = false, confidence = 0f)
-        val currentLocation = LatLng(pose.latitude, pose.longitude)
-
-        val best = crosswalkGuidePoints
-            .map { point ->
-                val distance = currentLocation.distanceTo(point.location)
-                val bearing = bearingDegrees(currentLocation, point.location)
-                val delta = heading?.let { normalizeDeltaDegrees(bearing - it) }
-                val distanceScore = (1.0 - (distance / CROSSWALK_MAP_PRIOR_RADIUS_METERS)).coerceIn(0.0, 1.0)
-                val headingScore = delta
-                    ?.let { (1.0 - (abs(it) / CROSSWALK_HEADING_PRIOR_DEGREES)).coerceIn(0.0, 1.0) }
-                    ?: 0.55
-                val confidence = ((distanceScore * 0.68) + (headingScore * 0.32)).toFloat().coerceIn(0f, 1f)
-                Triple(point, distance, delta) to confidence
-            }
-            .filter { (_, confidence) -> confidence > 0f }
-            .maxByOrNull { it.second }
-            ?: return CrosswalkMapCue(active = false, confidence = 0f)
-
-        val distance = best.first.second
-        val delta = best.first.third
-        val headingOk = delta == null || abs(delta) <= CROSSWALK_HEADING_PRIOR_DEGREES
-        val active = distance <= CROSSWALK_MAP_PRIOR_RADIUS_METERS && headingOk && best.second >= 0.22f
-        return CrosswalkMapCue(
-            active = active,
-            confidence = if (active) best.second else 0f,
-            distanceMeters = distance.toFloat(),
-            headingDeltaDegrees = delta?.toFloat(),
-        )
-    }
-
-    private fun bearingDegrees(from: LatLng, to: LatLng): Double {
-        val fromLat = Math.toRadians(from.latitude)
-        val toLat = Math.toRadians(to.latitude)
-        val deltaLon = Math.toRadians(to.longitude - from.longitude)
-        val y = sin(deltaLon) * cos(toLat)
-        val x = (cos(fromLat) * sin(toLat)) - (sin(fromLat) * cos(toLat) * cos(deltaLon))
-        var bearing = Math.toDegrees(atan2(y, x))
-        if (bearing < 0.0) bearing += 360.0
-        return bearing
-    }
-
-    private fun normalizeDeltaDegrees(value: Double): Double {
-        var normalized = ((value + 540.0) % 360.0) - 180.0
-        if (normalized == -180.0) normalized = 180.0
-        return normalized
-    }
-
     private fun routeGuidanceDetail(guidance: RouteCameraGuidance?): String {
         if (guidance == null) return ""
         val headingDelta = guidance.headingDeltaDegrees?.let { "${it.toInt()}deg" } ?: "--"
@@ -1074,7 +949,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         acquireArDepthFrame(frame, debugFlags.rawDepthEnabled).use { depthFrame ->
         val corridorHits = if (debugFlags.arCoreHitTestEnabled) sampleWorldCorridor(frame) else emptyList()
         val vlmVisionState = if (debugFlags.vlmEnabled) currentVlmVisionState(frame.timestamp) else null
-        val crosswalkFusion = computeCrosswalkFusion(frame, debugFlags)
         val rawDepthCorridorResult = if (debugFlags.rawDepthEnabled) {
             sampleRawDepthCorridor(
                 frame = frame,
@@ -1335,13 +1209,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 guidanceLabel = guidanceLabel,
                 statusLabel = statusLabel,
                 statusLevel = level,
-                crosswalkDetected = crosswalkFusion.detected,
-                crosswalkScore = crosswalkFusion.score,
-                crosswalkStripeCount = crosswalkFusion.stripeCount,
-                crosswalkYoloConfidence = crosswalkFusion.yoloConfidence,
-                crosswalkModeLabel = crosswalkFusion.modeLabel,
-                crosswalkMapDistanceMeters = crosswalkFusion.mapDistanceMeters,
-                crosswalkMapHeadingDeltaDegrees = crosswalkFusion.mapHeadingDeltaDegrees,
                 objectDetections = if (debugVisualizationVisible) overlayDetections else emptyList(),
                 depthGridCells = if (debugVisualizationVisible) depthGridCells else emptyList(),
                 walkingZoneDepthSamples = if (debugVisualizationVisible && debugFlags.walkingZoneDistanceEnabled) {
@@ -1467,14 +1334,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                         emptyList()
                     }
                     image.close()
-                    val yoloCrosswalkConfidence = detectedObjects
-                        .filter { it.label.equals("crosswalk", ignoreCase = true) }
-                        .maxOfOrNull { it.confidence }
-                        ?: 0f
-                    lastCrosswalkFrameSnapshot = CrosswalkFrameSnapshot(
-                        pattern = yoloOnlyCrosswalkResult(yoloCrosswalkConfidence),
-                        timestampNanos = frame.timestamp,
-                    )
                     val trackedDetections = objectTracker.update(
                         detections = detectedObjects.map { detection ->
                             DetectedObjectResult(
@@ -1560,19 +1419,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 } else {
                     emptyList()
                 }
-                val yoloCrosswalkConfidence = detectedObjects
-                    .filter { it.label.equals("crosswalk", ignoreCase = true) }
-                    .maxOfOrNull { it.confidence }
-                    ?: 0f
-                val crosswalk = crosswalkPatternDetector.detect(
-                    bitmap = analysisBitmap,
-                    floorSegmentation = null,
-                    yoloConfidence = yoloCrosswalkConfidence,
-                )
-                lastCrosswalkFrameSnapshot = CrosswalkFrameSnapshot(
-                    pattern = crosswalk,
-                    timestampNanos = frame.timestamp,
-                )
                 val trackedDetections = objectTracker.update(
                     detections = detectedObjects.map { detection ->
                         DetectedObjectResult(
@@ -1619,7 +1465,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                         bitmap = analysisBitmap,
                         spatialFrame = spatialFrame,
                         primaryAnalysis = primaryAnalysis,
-                        crosswalk = crosswalk,
                         timestampNanos = frame.timestamp,
                     )
                 }
@@ -1748,7 +1593,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         bitmap: Bitmap,
         spatialFrame: SpatialFrame,
         primaryAnalysis: FrameAnalysis,
-        crosswalk: CrosswalkPatternResult,
         timestampNanos: Long,
     ) {
         if (!oneShotVlmInFlight.compareAndSet(false, true)) {
@@ -1785,7 +1629,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
                 val interpretation = localVlmInterpreter.interpret(
                     frame = modelFrame,
                     primaryAnalysis = primaryAnalysis,
-                    crosswalk = crosswalk,
                     outputLanguageCode = outputLanguageCode,
                 )
                 val buttonToAnswerLatencyMs = SystemClock.elapsedRealtime() - requestedAtMs
@@ -3432,10 +3275,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
         private const val VLM_ANALYSIS_MAX_LONG_SIDE = 768
         private const val DEPTH_MEASUREMENT_LOG_INTERVAL_MS = 1_000L
         private const val GEOSPATIAL_RECONFIGURE_RETRY_MS = 2_000L
-        private const val CROSSWALK_PATTERN_STALE_NANOS = 1_500_000_000L
-        private const val CROSSWALK_HISTORY_SIZE = 5
-        private const val CROSSWALK_MAP_PRIOR_RADIUS_METERS = 45.0
-        private const val CROSSWALK_HEADING_PRIOR_DEGREES = 100.0
         private const val RAW_DEPTH_VISUALIZATION_MAX_MM = 10_000
         private const val GEOSPATIAL_DEPTH_VISUALIZATION_MAX_MM = 65_000
         private const val RAW_DEPTH_PROFILE_MIN_CONFIDENCE = 0.32f
@@ -3454,13 +3293,6 @@ class WalkAssistArFragment : Fragment(), GLSurfaceView.Renderer {
             nearestObstacle = null,
             floorSegmentation = null,
             pathMetrics = null,
-        )
-        private val EMPTY_CROSSWALK_RESULT = CrosswalkPatternResult(
-            detected = false,
-            score = 0f,
-            stripeCount = 0,
-            yoloConfidence = 0f,
-            modeLabel = "unavailable",
         )
         private val REPLAY_METADATA_TRACK_ID: UUID =
             UUID.fromString("7f5ee9f8-52b9-4e43-9c2c-89bb5f927af4")

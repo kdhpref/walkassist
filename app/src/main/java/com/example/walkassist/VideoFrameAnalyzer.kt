@@ -15,7 +15,6 @@ data class VideoFrameAnalysisResult(
     val detections: List<ObjectOverlayDetection>,
     val floorSegmentation: FloorSegmentationResult?,
     val pathMetrics: PathMetrics?,
-    val crosswalk: CrosswalkPatternResult,
     val debugInfo: AnalyzerDebugInfo,
     val vlmInterpretation: VlmSceneInterpretation?,
     val feedbackInput: FeedbackInput,
@@ -30,9 +29,6 @@ data class VideoFrameAnalysisResult(
                 append(" 바닥=${((floorSegmentation?.confidence ?: 0f) * 100f).toInt()}%")
                 append(" 이동가능=${clear?.let { String.format("%.1fm", it) } ?: "-"}")
                 append("장애물=${collision?.let { String.format("%.1fm", it) } ?: "-"}")
-                if (crosswalk.detected) {
-                    append(" 횡단보도=${(crosswalk.score * 100f).toInt()}%")
-                }
             }
         }
 }
@@ -59,7 +55,6 @@ class VideoFrameAnalyzer(
     private val distanceEstimator = DistanceEstimator()
     private val pathAnalyzer = PathAnalyzer()
     private val objectTracker = ObjectTracker()
-    private val crosswalkPatternDetector = CrosswalkPatternDetector()
 
     /*
      * Video replay only exercises image-based recognition. A plain gallery video
@@ -88,11 +83,6 @@ class VideoFrameAnalyzer(
             imageWidth = bitmap.width,
             imageHeight = bitmap.height,
         )
-        val crosswalk = crosswalkPatternDetector.detect(
-            bitmap = bitmap,
-            floorSegmentation = floorSegmentation,
-            yoloConfidence = rawDetections.crosswalkConfidence(),
-        )
         val vlmInterpretation: VlmSceneInterpretation? = null
         val overlayDetections = trackedObjects.toOverlayDetections(bitmap)
         val guidanceState = buildReplayGuidanceState(
@@ -109,7 +99,6 @@ class VideoFrameAnalyzer(
             detections = overlayDetections,
             floorSegmentation = floorSegmentation,
             pathMetrics = pathMetrics,
-            crosswalk = crosswalk,
             debugInfo = AnalyzerDebugInfo(
                 detectorReady = objectAnalyzer.isReady(),
                 floorConfidence = floorSegmentation.confidence,
@@ -142,11 +131,6 @@ class VideoFrameAnalyzer(
                 guidanceLabel = guidanceState.guidanceLabel,
                 statusLabel = "영상 테스트 보행 안내",
                 statusLevel = guidanceState.statusLevel,
-                crosswalkDetected = crosswalk.detected,
-                crosswalkScore = crosswalk.score,
-                crosswalkStripeCount = crosswalk.stripeCount,
-                crosswalkYoloConfidence = crosswalk.yoloConfidence,
-                crosswalkModeLabel = crosswalk.modeLabel,
                 objectDetections = overlayDetections,
                 vlmModelName = vlmInterpretation?.modelName.orEmpty(),
                 vlmRiskLabel = vlmInterpretation?.risk?.name?.lowercase().orEmpty(),
@@ -196,11 +180,6 @@ class VideoFrameAnalyzer(
                 segmentPolygon = detection.segmentPolygon,
             )
         }
-    }
-
-    private fun List<RawDetection>.crosswalkConfidence(): Float {
-        return filter { it.label.equals("crosswalk", ignoreCase = true) }
-            .maxOfOrNull { it.confidence } ?: 0f
     }
 
     private fun List<DetectedObjectResult>.toOverlayDetections(bitmap: Bitmap): List<ObjectOverlayDetection> {

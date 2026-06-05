@@ -274,7 +274,6 @@ class MainWindow(QMainWindow):
         self.loaded_model_path: str | None = None
         self.classes: list[str] = [
             "person",
-            "crosswalk",
             "stairs_up",
             "stairs_down",
             "traffic_light_red",

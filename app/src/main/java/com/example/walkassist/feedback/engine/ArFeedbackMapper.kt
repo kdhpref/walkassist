@@ -42,7 +42,6 @@ class ArFeedbackMapper {
                         sensorType = sensorType,
                     ),
                     direction = state.suggestedDirection,
-                    crosswalkDetected = state.crosswalkDetected,
                 )
             }
         }
